@@ -1,0 +1,17 @@
+﻿# Python
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+*.pyc
+
+# Secrets — never commit these
+backend/.env
+frontend/.env
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# OS / editor junk
+.DS_Store
+.vscode/

@@ -1,0 +1,64 @@
+"""
+config.py
+
+Centralized settings loaded from environment variables. Every external
+service (Supabase, Pinecone, Groq, Langfuse) needs credentials, and we
+want a single, obvious place to see what's required rather than env
+lookups scattered across modules. Pydantic's BaseSettings also gives us
+fail-fast behavior: the app refuses to boot with a clear error if a
+required key is missing, instead of failing mysteriously mid-request.
+"""
+
+from functools import lru_cache
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    # --- Supabase (auth + Postgres + RLS) ---
+    supabase_url: str
+    supabase_anon_key: str
+    supabase_service_role_key: str  # server-side only, bypasses RLS when needed
+
+    # --- Vector store ---
+    pinecone_api_key: str
+    pinecone_index_name: str = "rag-multitenant"
+    pinecone_environment: str = "us-east-1"
+
+    # --- LLM (Groq, OpenAI-compatible) ---
+    groq_api_key: str
+    groq_model: str = "llama-3.3-70b-versatile"
+
+    # --- Embeddings (local, no external API) ---
+    embedding_model_name: str = "all-MiniLM-L6-v2"
+    embedding_dim: int = 384
+
+    # --- Retrieval ---
+    retrieval_candidate_pool: int = 25
+    retrieval_top_k: int = 6
+    bm25_cache_ttl_seconds: int = 600  # 10 min; invalidated early on upload/delete
+
+    # --- Confidence gating ---
+    # AGENTIC: always answer; low confidence gets a "not grounded in your
+    # documents" note but the LLM's general knowledge still responds.
+    # GATED: below confidence_threshold, refuse to generate and ask the
+    # user to rephrase / upload more relevant docs.
+    # See llm/confidence.py and llm/client.py docstrings for the full
+    # rationale behind defaulting to AGENTIC.
+    generation_mode: str = "agentic"  # "agentic" | "gated"
+    confidence_gate_threshold: float = 0.35
+
+    # --- Observability ---
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+
+    # --- Misc ---
+    cors_origins: list[str] = ["http://localhost:5173"]
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Cached so we parse the environment once per process, not per request."""
+    return Settings()
