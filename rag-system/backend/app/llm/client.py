@@ -118,7 +118,7 @@ def describe_image_with_vision(image_bytes: bytes) -> str:
 
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     resp = _client.chat.completions.create(
-        model="llama-3.2-11b-vision-preview",
+        model="openai/gpt-oss-120b",
         messages=[
             {
                 "role": "user",
@@ -130,3 +130,4 @@ def describe_image_with_vision(image_bytes: bytes) -> str:
         ],
     )
     return resp.choices[0].message.content or ""
+

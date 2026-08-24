@@ -97,3 +97,4 @@ def compute_confidence(answer: str, chunks: list[RetrievedChunk]) -> ConfidenceR
             "lexical_semantic_grounding": round(lexical_semantic_grounding, 4),
         },
     )
+
