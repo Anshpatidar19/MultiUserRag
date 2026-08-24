@@ -1,9 +1,20 @@
 import { useEffect, useState } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, Outlet } from "react-router-dom";
 import { supabase } from "../api/supabase";
+import { SessionsProvider } from "../context/SessionsContext";
 import Sidebar from "./Sidebar";
 
-export default function ProtectedRoute({ children }) {
+/**
+ * Rendered ONCE as a layout route wrapping all authenticated pages via
+ * <Outlet/>, rather than individually around each page element. This
+ * matters: if each page wrapped itself in a fresh ProtectedRoute, the
+ * SessionsProvider underneath would remount on every navigation and
+ * silently reset which chat session is "active" the moment you click
+ * into Knowledge Base or Upload and back. Mounting it once at the
+ * layout level keeps the sidebar and active-session state stable while
+ * only the inner page content swaps.
+ */
+export default function ProtectedRoute() {
   const [session, setSession] = useState(undefined); // undefined = loading
 
   useEffect(() => {
@@ -16,9 +27,13 @@ export default function ProtectedRoute({ children }) {
   if (!session) return <Navigate to="/login" replace />;
 
   return (
-    <div className="app-shell">
-      <Sidebar />
-      <div className="main-area">{children}</div>
-    </div>
+    <SessionsProvider>
+      <div className="app-shell">
+        <Sidebar />
+        <div className="main-area">
+          <Outlet />
+        </div>
+      </div>
+    </SessionsProvider>
   );
 }

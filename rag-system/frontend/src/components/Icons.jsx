@@ -72,6 +72,18 @@ export const LogoutIcon = (p) => (
     <path d="M21 12H9" />
   </svg>
 );
+export const FileIcon = (p) => (
+  <svg {...base} {...p}>
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+    <path d="M14 2v6h6" />
+  </svg>
+);
+export const PanelIcon = (p) => (
+  <svg {...base} {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M9 4v16" />
+  </svg>
+);
 export const UserIcon = (p) => (
   <svg {...base} {...p}>
     <circle cx="12" cy="8" r="4" />
