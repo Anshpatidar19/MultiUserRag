@@ -15,8 +15,8 @@ export default function Signup() {
   async function handleSubmit(e) {
     e.preventDefault();
     setError("");
-    if (password.length < 10) {
-      setError("Password must be at least 10 characters.");
+    if (password.length < 6) {
+      setError("Password must be at least 6 characters.");
       return;
     }
     if (password !== confirm) {
@@ -59,7 +59,7 @@ export default function Signup() {
           </div>
           <div className="field">
             <label>Password</label>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 10 characters" required />
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="At least 6 characters" required />
           </div>
           <div className="field">
             <label>Confirm password</label>

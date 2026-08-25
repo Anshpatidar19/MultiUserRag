@@ -126,7 +126,7 @@ export default function Chat() {
 
         {messages.map((m) => (
           <div key={m.id} className={`msg-row ${m.role}`}>
-            <div style={{ maxWidth: "68%" }}>
+            <div style={{ maxWidth: "65ch" }}>
               <div className={`msg-bubble ${m.role}`}>
                 <ReactMarkdown>{m.content}</ReactMarkdown>
               </div>

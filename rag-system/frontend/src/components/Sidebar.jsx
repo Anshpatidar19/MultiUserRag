@@ -48,7 +48,7 @@ export default function Sidebar() {
             <span className="sidebar-brand-mark">
               <ShieldIcon width={16} height={16} />
             </span>
-            KnowledgeBase AI
+            MultiUserRag
           </div>
         )}
         <button className="icon-btn sidebar-toggle" onClick={() => setCollapsed((c) => !c)} title={collapsed ? "Expand sidebar" : "Collapse sidebar"}>

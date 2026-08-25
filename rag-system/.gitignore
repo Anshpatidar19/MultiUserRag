@@ -17,3 +17,6 @@ frontend/dist/
 .vscode/
 
 venv
+.venv/
+rag-system/.venv/
+MultiUserRag/rag-system/.venv/

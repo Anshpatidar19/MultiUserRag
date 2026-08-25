@@ -30,7 +30,7 @@ export default function Login() {
         <div className="auth-icon">
           <ShieldIcon width={26} height={26} />
         </div>
-        <h1 className="auth-title">Sign in to KnowledgeBase AI</h1>
+        <h1 className="auth-title">Sign in to MultiUserRag</h1>
         <p className="auth-subtitle">Your private, AI-powered document assistant</p>
 
         <form onSubmit={handleSubmit}>

@@ -514,7 +514,7 @@ a {
 }
 
 .msg-bubble {
-  max-width: 68%;
+  max-width: 65ch;
   padding: 13px 16px;
   border-radius: 16px;
   font-size: 14.5px;
@@ -565,6 +565,8 @@ a {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 10px 10px 10px 18px;
+  max-width: 760px;
+  margin: 0 auto;
 }
 
 .composer-inner textarea {
