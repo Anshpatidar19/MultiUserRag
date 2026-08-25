@@ -20,7 +20,11 @@ create table if not exists documents (
   uploaded_at timestamptz not null default now(),
   chunk_count int not null default 0,
   status text not null default 'processing' check (status in ('processing','ready','failed')),
-  error_message text
+  error_message text,
+  -- Path of the original uploaded file inside the "documents" storage
+  -- bucket, e.g. "{user_id}/{document_id}-{source_name}". Null for
+  -- source types with no raw file to keep (youtube).
+  storage_path text
 );
 
 alter table documents enable row level security;
@@ -109,3 +113,32 @@ create index if not exists idx_documents_user on documents(user_id);
 create index if not exists idx_chunks_user on document_chunks(user_id);
 create index if not exists idx_sessions_user on chat_sessions(user_id);
 create index if not exists idx_messages_session on chat_messages(session_id);
+
+-- ---------------------------------------------------------------------
+-- Storage: "documents" bucket
+--
+-- Raw uploaded files (pdf/image/csv/docx) live here, one folder per
+-- user: objects are stored at "{user_id}/{document_id}-{filename}".
+-- That user_id folder prefix is what the RLS policies below check
+-- against auth.uid(), so this gets the same "can't see another user's
+-- files even via a raw storage query" guarantee that the Postgres
+-- tables above get from their own RLS policies. Kept private (not
+-- public) -- the frontend/backend always reach files via short-lived
+-- signed URLs (see routers/documents.py), never a public bucket URL.
+-- ---------------------------------------------------------------------
+
+insert into storage.buckets (id, name, public)
+values ('documents', 'documents', false)
+on conflict (id) do nothing;
+
+create policy "storage_documents_select_own"
+  on storage.objects for select
+  using (bucket_id = 'documents' and (storage.foldername(name))[1] = auth.uid()::text);
+
+create policy "storage_documents_insert_own"
+  on storage.objects for insert
+  with check (bucket_id = 'documents' and (storage.foldername(name))[1] = auth.uid()::text);
+
+create policy "storage_documents_delete_own"
+  on storage.objects for delete
+  using (bucket_id = 'documents' and (storage.foldername(name))[1] = auth.uid()::text);

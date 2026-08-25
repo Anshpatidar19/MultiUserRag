@@ -118,7 +118,7 @@ def describe_image_with_vision(image_bytes: bytes) -> str:
 
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     resp = _client.chat.completions.create(
-        model="openai/gpt-oss-120b",
+        model="qwen/qwen3.6-27b",
         messages=[
             {
                 "role": "user",
