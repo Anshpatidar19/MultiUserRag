@@ -78,6 +78,11 @@ export const FileIcon = (p) => (
     <path d="M14 2v6h6" />
   </svg>
 );
+export const ChevronDownIcon = (p) => (
+  <svg {...base} {...p}>
+    <path d="M6 9l6 6 6-6" />
+  </svg>
+);
 export const PanelIcon = (p) => (
   <svg {...base} {...p}>
     <rect x="3" y="4" width="18" height="16" rx="2" />

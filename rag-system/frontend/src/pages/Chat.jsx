@@ -5,7 +5,7 @@ import ConfidenceBadge from "../components/ConfidenceBadge";
 import { useSessions } from "../context/SessionsContext";
 import { useVoice } from "../hooks/useVoice";
 import { exportConversationToPdf } from "../utils/exportPdf";
-import { SendIcon, MicIcon, DownloadIcon, ChatIcon } from "../components/Icons";
+import { SendIcon, MicIcon, DownloadIcon, ChatIcon, ChevronDownIcon } from "../components/Icons";
 
 // Simple auto-detect: Devanagari code points => Hindi, else English.
 function detectLanguage(text) {
@@ -18,7 +18,12 @@ export default function Chat() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
+  // Citations are hidden by default and only shown per-message on click,
+  // rather than always rendered inline -- keeps the answer the visual
+  // focus and lets the person opt into the source detail.
+  const [expandedSources, setExpandedSources] = useState({});
   const bottomRef = useRef(null);
+  const citationRefs = useRef({});
   const voice = useVoice({ language: "en-US" });
 
   useEffect(() => {
@@ -35,6 +40,15 @@ export default function Chat() {
     setMessages(data);
   }
 
+  function toggleSources(messageId) {
+    setExpandedSources((prev) => ({ ...prev, [messageId]: !prev[messageId] }));
+    // Wait one tick for the panel to actually render before scrolling
+    // to it -- scrollIntoView on a not-yet-mounted ref is a no-op.
+    setTimeout(() => {
+      citationRefs.current[messageId]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }, 60);
+  }
+
   async function handleSend() {
     if (!input.trim() || streaming) return;
 
@@ -45,8 +59,6 @@ export default function Chat() {
       sessionId = s.id;
       isFirstMessage = true;
     } else if (!messages.length) {
-      // Session exists but has no messages yet (e.g. freshly created via
-      // sidebar "+ New chat") -- this is still its first message.
       isFirstMessage = true;
     }
 
@@ -57,8 +69,6 @@ export default function Chat() {
     setStreaming(true);
     setStreamingText("");
 
-    // Give the chat a real name from its first message, ChatGPT-style,
-    // instead of leaving it as "New chat" forever.
     if (isFirstMessage) {
       autoNameFromMessage(sessionId, question);
     }
@@ -126,23 +136,40 @@ export default function Chat() {
 
         {messages.map((m) => (
           <div key={m.id} className={`msg-row ${m.role}`}>
-            <div style={{ maxWidth: "65ch" }}>
+            <div style={{ maxWidth: "68%" }}>
               <div className={`msg-bubble ${m.role}`}>
                 <ReactMarkdown>{m.content}</ReactMarkdown>
               </div>
               {m.role === "assistant" && (
-                <div className="msg-meta">
-                  <ConfidenceBadge score={m.confidence_score} label={m.confidence_label} />
-                  {m.grounded === false && <span className="badge badge-low">Not based on your documents</span>}
-                  {m.citations?.map((c, i) => (
-                    <span key={i} className="citation-chip" title={c.preview}>
-                      {c.source_name} · {Math.round(c.relevance_score * 1000) / 1000}
-                    </span>
-                  ))}
-                  <button className="icon-btn" style={{ width: 26, height: 26 }} onClick={() => voice.speak(m.content, detectLanguage(m.content) === "hi" ? "hi-IN" : "en-US")}>
-                    🔊
-                  </button>
-                </div>
+                <>
+                  <div className="msg-meta">
+                    <ConfidenceBadge score={m.confidence_score} label={m.confidence_label} />
+                    {m.grounded === false && <span className="badge badge-low">Not based on your documents</span>}
+                    {!!m.citations?.length && (
+                      <button className="sources-toggle" onClick={() => toggleSources(m.id)}>
+                        Sources ({m.citations.length})
+                        <ChevronDownIcon width={13} height={13} style={{ transform: expandedSources[m.id] ? "rotate(180deg)" : "none", transition: "transform 0.15s ease" }} />
+                      </button>
+                    )}
+                    <button className="icon-btn" style={{ width: 26, height: 26 }} onClick={() => voice.speak(m.content, detectLanguage(m.content) === "hi" ? "hi-IN" : "en-US")}>
+                      🔊
+                    </button>
+                  </div>
+
+                  {expandedSources[m.id] && !!m.citations?.length && (
+                    <div className="citations-panel" ref={(el) => (citationRefs.current[m.id] = el)}>
+                      {m.citations.map((c, i) => (
+                        <div key={i} className="citation-row">
+                          <div>
+                            <span className="citation-name">{c.source_name}</span>
+                            <span className="citation-score">relevance {c.relevance_score}</span>
+                          </div>
+                          {c.preview && <p className="citation-preview">{c.preview}</p>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </div>

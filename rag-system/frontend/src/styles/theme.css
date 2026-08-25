@@ -551,6 +551,63 @@ a {
   cursor: default;
 }
 
+.sources-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.sources-toggle:hover {
+  background: #f3f3fa;
+  color: var(--text-primary);
+}
+
+.citations-panel {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: 14px 16px;
+}
+
+.citation-row {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.citation-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.citation-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.citation-score {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-left: 8px;
+}
+
+.citation-preview {
+  margin: 5px 0 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
 .composer {
   border-top: 1px solid var(--border);
   padding: 16px 24px 20px;
