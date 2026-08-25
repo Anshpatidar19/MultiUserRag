@@ -60,6 +60,12 @@ class DocumentOut(BaseModel):
     chunk_count: int
     status: Literal["processing", "ready", "failed"]
     error_message: str | None = None
+    storage_path: str | None = None  # null for source types with no raw file (youtube)
+
+
+class DocumentUrlOut(BaseModel):
+    url: str
+    expires_in: int
 
 
 class YoutubeIngestRequest(BaseModel):

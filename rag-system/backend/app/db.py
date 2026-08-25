@@ -19,6 +19,7 @@ client everywhere for convenience," which would quietly defeat RLS.
 
 from functools import lru_cache
 from supabase import create_client, Client
+from supabase.lib.client_options import ClientOptions
 from app.config import get_settings
 
 settings = get_settings()
@@ -33,7 +34,19 @@ def get_user_client(access_token: str) -> Client:
     """
     Build a request-scoped client authenticated as the calling user.
     Not cached (and not cacheable) because the token differs per request.
+
+    IMPORTANT: `create_client` sets every sub-client's Authorization
+    header (postgrest, storage, auth) from `options.headers` at
+    construction time. Calling `client.postgrest.auth(access_token)`
+    *after* construction only updates the postgrest session -- it does
+    NOT reach the storage client, which would otherwise keep sending
+    the anon key and get silently rejected by the "documents" bucket's
+    RLS policies (auth.uid() is null for the anon key). Passing the
+    user's JWT via ClientOptions up front makes every sub-client --
+    Postgres queries AND Storage uploads/downloads/deletes -- run as
+    that user.
     """
-    client = create_client(settings.supabase_url, settings.supabase_anon_key)
+    options = ClientOptions(headers={"Authorization": f"Bearer {access_token}"})
+    client = create_client(settings.supabase_url, settings.supabase_anon_key, options=options)
     client.postgrest.auth(access_token)
     return client

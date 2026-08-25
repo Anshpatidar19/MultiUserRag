@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_anon_key: str
     supabase_service_role_key: str  # server-side only, bypasses RLS when needed
+    supabase_storage_bucket: str = "documents"  # holds raw uploaded files, per-user folders
 
     # --- Vector store ---
     pinecone_api_key: str
