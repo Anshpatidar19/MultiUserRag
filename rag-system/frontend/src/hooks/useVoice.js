@@ -1,34 +1,45 @@
 import { useCallback, useRef, useState } from "react";
 
 /**
- * Thin wrapper around the browser's Web Speech API (SpeechRecognition +
- * SpeechSynthesis). Kept as a hook rather than a component so both the
- * mic button and the "read answer aloud" action can share one instance
- * without prop drilling. Falls back gracefully (isSupported=false) in
- * browsers without SpeechRecognition (e.g. Firefox) so voice mode is
- * additive, not a hard requirement to use the app.
+ * Thin wrapper around the browser's Web Speech API
+ * (SpeechRecognition + SpeechSynthesis).
  */
 export function useVoice({ language = "en-US" } = {}) {
   const [isRecording, setIsRecording] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+
   const recognitionRef = useRef(null);
 
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const SpeechRecognition =
+    window.SpeechRecognition || window.webkitSpeechRecognition;
+
   const isSupported = !!SpeechRecognition;
 
   const startListening = useCallback(
     (onResult) => {
       if (!isSupported) return;
+
       const recognition = new SpeechRecognition();
+
       recognition.lang = language;
       recognition.interimResults = false;
       recognition.maxAlternatives = 1;
+
       recognition.onresult = (event) => {
         const transcript = event.results[0][0].transcript;
         onResult(transcript);
       };
-      recognition.onend = () => setIsRecording(false);
-      recognition.onerror = () => setIsRecording(false);
+
+      recognition.onend = () => {
+        setIsRecording(false);
+      };
+
+      recognition.onerror = () => {
+        setIsRecording(false);
+      };
+
       recognitionRef.current = recognition;
+
       recognition.start();
       setIsRecording(true);
     },
@@ -37,16 +48,72 @@ export function useVoice({ language = "en-US" } = {}) {
 
   const stopListening = useCallback(() => {
     recognitionRef.current?.stop();
+    recognitionRef.current = null;
     setIsRecording(false);
   }, []);
 
-  const speak = useCallback((text, lang = language) => {
-    if (!window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = lang;
-    window.speechSynthesis.speak(utterance);
-  }, [language]);
+  const speak = useCallback(
+    (text, lang = language) => {
+      if (!window.speechSynthesis) return;
 
-  return { isSupported, isRecording, startListening, stopListening, speak };
+      // Stop anything currently playing first.
+      window.speechSynthesis.cancel();
+
+      const utterance = new SpeechSynthesisUtterance(text);
+
+      utterance.lang = lang;
+      utterance.rate = 1;
+      utterance.pitch = 1;
+      utterance.volume = 1;
+
+      utterance.onstart = () => {
+        setIsSpeaking(true);
+      };
+
+      utterance.onend = () => {
+        setIsSpeaking(false);
+      };
+
+      utterance.onerror = () => {
+        setIsSpeaking(false);
+      };
+
+      window.speechSynthesis.speak(utterance);
+    },
+    [language]
+  );
+
+  const stopSpeaking = useCallback(() => {
+    if (!window.speechSynthesis) return;
+
+    window.speechSynthesis.cancel();
+    setIsSpeaking(false);
+  }, []);
+
+  const toggleSpeaking = useCallback(
+    (text, lang = language) => {
+      if (!window.speechSynthesis) return;
+
+      if (window.speechSynthesis.speaking) {
+        stopSpeaking();
+        return;
+      }
+
+      speak(text, lang);
+    },
+    [language, speak, stopSpeaking]
+  );
+
+  return {
+    isSupported,
+    isRecording,
+    startListening,
+    stopListening,
+
+    // TTS
+    isSpeaking,
+    speak,
+    stopSpeaking,
+    toggleSpeaking,
+  };
 }
