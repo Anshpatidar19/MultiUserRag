@@ -47,14 +47,25 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
                 {"session_id": body.session_id, "user_id": user.id, "role": "user", "content": body.message}
             ).execute()
 
+            # Status events tell the frontend which real pipeline stage is
+            # running, so the "thinking" indicator shows what's actually
+            # happening (searching, reading, generating) instead of a
+            # generic placeholder. These are cheap to emit -- just a few
+            # extra SSE lines before the token stream starts.
             chunks = []
             if branch == "rag":
+                yield f"data: {json.dumps({'type': 'status', 'message': 'Searching your documents…'})}\n\n"
                 with stage_span(trace, "retrieval", query=body.message) as span:
                     fused = hybrid_search(user.db, user.id, body.message)
                     chunks = rerank(body.message, fused)
                     span.update(output={"retrieved": [c.text[:200] for c in chunks]})
+                yield f"data: {json.dumps({'type': 'status', 'message': 'Reading relevant sources…'})}\n\n"
+            else:
+                yield f"data: {json.dumps({'type': 'status', 'message': 'Thinking…'})}\n\n"
 
             history = _load_history(user.db, body.session_id, user.id)
+
+            yield f"data: {json.dumps({'type': 'status', 'message': 'Writing an answer…'})}\n\n"
 
             full_answer = ""
             with stage_span(trace, "generation", language=body.language) as gen_span:
