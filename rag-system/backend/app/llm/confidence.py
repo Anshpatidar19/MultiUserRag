@@ -6,12 +6,16 @@ confidence, because models are known to be overconfident and their
 stated confidence doesn't reliably track actual grounding. Instead we
 blend three independently-measurable signals:
 
-1. retrieval_similarity: mean of the top chunks' dense cosine scores.
-   High => the query has strong semantic matches in the KB at all.
-2. source_agreement: how many *distinct documents* (not just chunks)
-   contributed to the top-k context. A claim triangulated across
-   multiple independent sources is more trustworthy than one repeated
-   from a single doc's neighboring chunks.
+1. retrieval_similarity: how well-matched the retrieved chunks are to
+   the query. Uses real dense cosine scores where available, and a
+   sensible imputed estimate where a chunk only matched via the BM25
+   keyword side (see _chunk_similarity_estimate below) -- an exact
+   keyword hit is a real signal, not "no evidence."
+2. source_agreement: how many *distinct documents* contributed to the
+   top-k context, credited generously for a single well-matched source
+   rather than assuming multi-document corroboration is required to
+   trust an answer (a single-document knowledge base is a normal,
+   common case).
 3. lexical_semantic_grounding: token-overlap-based similarity between
    the generated answer and the retrieved context, as a lightweight
    proxy for "did the model actually use what we gave it, or drift into
@@ -55,20 +59,41 @@ def _label(score: float) -> str:
     return "Low"
 
 
+def _chunk_similarity_estimate(c: RetrievedChunk) -> float:
+    """
+    Prefer the real dense cosine score. If a chunk only surfaced via
+    the BM25 keyword side of hybrid search (dense_score is None -- it
+    didn't rank in Pinecone's top candidates, only in the keyword
+    search), that is NOT evidence of a weak match; it just means we
+    don't have a cosine number for it. An exact keyword hit that made
+    it through RRF fusion and reranking is still a real relevance
+    signal, so it gets a moderate imputed score instead of silently
+    contributing zero and dragging the whole calculation down.
+    """
+    if c.dense_score is not None:
+        return max(0.0, min(1.0, c.dense_score))
+    return 0.6 if c.bm25_score is not None else 0.3
+
+
 def compute_confidence(answer: str, chunks: list[RetrievedChunk]) -> ConfidenceResult:
     if not chunks:
         return ConfidenceResult(score=0.0, label="Low", components={
             "retrieval_similarity": 0.0, "source_agreement": 0.0, "lexical_semantic_grounding": 0.0,
         })
 
-    # 1. retrieval similarity (dense cosine scores are already 0..1-ish for normalized embeddings)
-    dense_scores = [c.dense_score for c in chunks if c.dense_score is not None]
-    retrieval_similarity = sum(dense_scores) / len(dense_scores) if dense_scores else 0.0
+    # 1. retrieval similarity -- averaged over ALL chunks, with missing
+    # dense scores imputed rather than dropped (see docstring above).
+    retrieval_similarity = sum(_chunk_similarity_estimate(c) for c in chunks) / len(chunks)
     retrieval_similarity = max(0.0, min(1.0, retrieval_similarity))
 
-    # 2. source agreement: distinct documents represented, normalized
+    # 2. source agreement -- a single matching document still earns
+    # solid credit (0.6); additional distinct documents add on top of
+    # that, rather than being required just to reach a baseline.
     distinct_docs = len({c.document_id for c in chunks})
-    source_agreement = min(1.0, distinct_docs / 3.0)  # 3+ independent sources => full credit
+    if distinct_docs <= 1:
+        source_agreement = 0.6
+    else:
+        source_agreement = min(1.0, 0.6 + 0.2 * (distinct_docs - 1))
 
     # 3. lexical/semantic grounding: token overlap between answer and context
     answer_tokens = _tokens(answer)
@@ -97,4 +122,3 @@ def compute_confidence(answer: str, chunks: list[RetrievedChunk]) -> ConfidenceR
             "lexical_semantic_grounding": round(lexical_semantic_grounding, 4),
         },
     )
-
