@@ -5,16 +5,7 @@ import ConfidenceBadge from "../components/ConfidenceBadge";
 import { useSessions } from "../context/SessionsContext";
 import { useVoice } from "../hooks/useVoice";
 import { exportConversationToPdf } from "../utils/exportPdf";
-<<<<<<< HEAD
-import {
-  SendIcon,
-  MicIcon,
-  DownloadIcon,
-  ChatIcon,
-} from "../components/Icons";
-=======
 import { SendIcon, MicIcon, DownloadIcon, ChatIcon, ChevronDownIcon } from "../components/Icons";
->>>>>>> update_the_backend
 
 // Simple auto-detect: Devanagari code points => Hindi, else English.
 function detectLanguage(text) {
