@@ -18,7 +18,6 @@ import {
 const NAV_ITEMS = [
   { to: "/knowledge-base", label: "Knowledge Base", icon: SessionsIcon },
   { to: "/upload", label: "Upload", icon: UploadIcon },
-  { to: "/settings", label: "Settings", icon: SettingsIcon },
 ];
 
 export default function Sidebar() {
@@ -126,6 +125,15 @@ export default function Sidebar() {
       )}
 
       <div className="sidebar-footer">
+        <NavLink
+          to="/settings"
+          className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
+          title="Settings"
+        >
+          <SettingsIcon width={17} height={17} />
+          {!collapsed && "Settings"}
+        </NavLink>
+
         <button className="nav-item" onClick={handleLogout} title="Log out">
           <LogoutIcon width={17} height={17} />
           {!collapsed && "Log out"}
