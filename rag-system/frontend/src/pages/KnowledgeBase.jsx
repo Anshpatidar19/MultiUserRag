@@ -70,7 +70,7 @@ export default function KnowledgeBase() {
 
   return (
     <div className="content">
-      <div className="topbar" style={{ padding: 0, border: "none", marginBottom: 20 }}>
+      <div className="page-heading">
         <h1>Knowledge Base</h1>
       </div>
 
