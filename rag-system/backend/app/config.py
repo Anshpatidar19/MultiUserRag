@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # current recommended flash-tier model if this one starts erroring
     # or gets deprecated.
     gemini_api_key: str
-    gemini_model: str = "gemini-3.6-flash"
+    gemini_model: str = "gemini-3.1-flash-lite"
 
     # --- Embeddings (local, no external API) ---
     embedding_model_name: str = "all-MiniLM-L6-v2"
@@ -41,7 +41,15 @@ class Settings(BaseSettings):
 
     # --- Retrieval ---
     retrieval_candidate_pool: int = 25
-    retrieval_top_k: int = 3
+    # How many RRF-fused candidates survive to be handed to the cross-encoder
+    # reranker. This MUST be larger than retrieval_top_k -- the whole point of
+    # reranking is to let the cross-encoder promote a chunk that RRF's cheap
+    # rank-fusion under-ranked (e.g. it only won on the sparse/BM25 side and
+    # got diluted by RRF_K smoothing). If we truncated to retrieval_top_k
+    # before reranking, the reranker would only ever get to reorder an
+    # already-too-narrow set and could never rescue a chunk RRF dropped.
+    retrieval_rerank_pool: int = 15
+    retrieval_top_k: int = 6
     bm25_cache_ttl_seconds: int = 600  # 10 min; invalidated early on upload/delete
 
     # --- Confidence gating ---

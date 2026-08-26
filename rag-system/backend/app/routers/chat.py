@@ -18,10 +18,12 @@ from app.llm.client import stream_answer, is_small_talk
 from app.llm.confidence import compute_confidence
 from app.models import ChatRequest
 from app.observability.tracing import query_trace, stage_span, record_confidence
+from app.config import get_settings
 from app.retrieval.hybrid import hybrid_search
 from app.retrieval.rerank import rerank
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+settings = get_settings()
 
 
 def _load_history(db, session_id: str, user_id: str) -> list[dict]:
@@ -57,7 +59,11 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
                 yield f"data: {json.dumps({'type': 'status', 'message': 'Searching your documents…'})}\n\n"
                 with stage_span(trace, "retrieval", query=body.message) as span:
                     fused = hybrid_search(user.db, user.id, body.message)
-                    chunks = rerank(body.message, fused)
+                    # hybrid_search returns the wider rerank pool, not the
+                    # final answer set -- the top_k cut belongs HERE, after
+                    # reranking, so the cross-encoder's reordering can
+                    # actually change which chunks make the final answer.
+                    chunks = rerank(body.message, fused)[: settings.retrieval_top_k]
                     span.update(output={"retrieved": [c.text[:200] for c in chunks]})
                 yield f"data: {json.dumps({'type': 'status', 'message': 'Reading relevant sources…'})}\n\n"
             else:
