@@ -59,11 +59,23 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
                 yield f"data: {json.dumps({'type': 'status', 'message': 'Searching your documents…'})}\n\n"
                 with stage_span(trace, "retrieval", query=body.message) as span:
                     fused = hybrid_search(user.db, user.id, body.message)
-                    # hybrid_search returns the wider rerank pool, not the
-                    # final answer set -- the top_k cut belongs HERE, after
-                    # reranking, so the cross-encoder's reordering can
-                    # actually change which chunks make the final answer.
-                    chunks = rerank(body.message, fused)[: settings.retrieval_top_k]
+                    reranked = rerank(body.message, fused)
+                    # Drop chunks the cross-encoder judged genuinely
+                    # irrelevant BEFORE taking the top_k slice. Without
+                    # this, "top 3 by rank" can mean "the 3 least-bad
+                    # options in a pool that contains nothing actually
+                    # relevant" -- e.g. a huge unrelated document
+                    # statistically out-competing a small relevant one on
+                    # RRF's rank fusion, even though the cross-encoder
+                    # correctly scores it as unrelated. Chunks with no
+                    # rerank_score (reranker unavailable) are kept as-is,
+                    # since there's no signal to filter on in that case.
+                    filtered = [
+                        c
+                        for c in reranked
+                        if c.rerank_score is None or c.rerank_score >= settings.retrieval_min_rerank_score
+                    ]
+                    chunks = filtered[: settings.retrieval_top_k]
                     span.update(output={"retrieved": [c.text[:200] for c in chunks]})
                 yield f"data: {json.dumps({'type': 'status', 'message': 'Reading relevant sources…'})}\n\n"
             else:
