@@ -41,7 +41,7 @@ class Settings(BaseSettings):
 
     # --- Retrieval ---
     retrieval_candidate_pool: int = 25
-    retrieval_top_k: int = 6
+    retrieval_top_k: int = 3
     bm25_cache_ttl_seconds: int = 600  # 10 min; invalidated early on upload/delete
 
     # --- Confidence gating ---
