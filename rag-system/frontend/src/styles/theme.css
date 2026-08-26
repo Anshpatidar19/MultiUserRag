@@ -222,6 +222,29 @@ a {
   font-weight: 600;
 }
 
+/* Small "N processing" count shown on the Knowledge Base nav item while
+   at least one document is still being chunked/embedded -- see
+   Sidebar.jsx / DocumentsContext.jsx. */
+.nav-badge {
+  flex-shrink: 0;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: 10.5px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.nav-item.active .nav-badge {
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+}
+
 .sidebar-footer {
   margin-top: auto;
   padding-top: 16px;
@@ -945,6 +968,32 @@ a {
 
 .doc-row-clickable:hover {
   border-color: var(--accent);
+}
+
+/* A document still being chunked/embedded (status "processing") --
+   shown from the moment its row is created, well before ingestion
+   finishes, since Upload.jsx/KnowledgeBase.jsx now read from
+   DocumentsContext instead of waiting on the upload request itself. */
+.doc-status-processing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--warning);
+}
+
+.doc-status-spinner {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid var(--warning-soft);
+  border-top-color: var(--warning);
+  animation: doc-status-spin 0.7s linear infinite;
+}
+
+@keyframes doc-status-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .modal-backdrop {

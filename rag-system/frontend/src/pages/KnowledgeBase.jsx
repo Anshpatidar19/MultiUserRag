@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { apiGet, apiDelete } from "../api/client";
+import { useState } from "react";
+import { useDocuments } from "../context/DocumentsContext";
+import { apiGet } from "../api/client";
 import { FileIcon, TrashIcon } from "../components/Icons";
 
 const TYPE_LABEL = { pdf: "PDF", image: "IMG", csv: "CSV", youtube: "YT", docx: "DOC" };
@@ -11,6 +12,14 @@ const TYPE_LABEL = { pdf: "PDF", image: "IMG", csv: "CSV", youtube: "YT", docx: 
  * "what do I have", clicking a document answers "what is it", and now
  * also lets you remove it.
  *
+ * Documents come from the shared DocumentsContext (same one Upload.jsx
+ * reads) instead of a page-local fetch, for two reasons: a document
+ * dropped on the Upload page shows up here right away without a manual
+ * refresh, and a still-"processing" document is now visible here too --
+ * previously this page only ever showed rows once ingestion had already
+ * finished, so anything mid-pipeline was invisible until you happened
+ * to reload after it completed.
+ *
  * "Open file" fetches a short-lived signed URL from the backend
  * (GET /documents/{id}/url) rather than storing/using any direct
  * storage URL client-side -- the bucket is private, so this is the
@@ -19,23 +28,14 @@ const TYPE_LABEL = { pdf: "PDF", image: "IMG", csv: "CSV", youtube: "YT", docx: 
  * "Delete" calls DELETE /documents/{id}, which removes the DB row,
  * the vectors, the BM25 chunk mirror, AND the stored file in one go
  * (see backend/app/routers/documents.py) -- so there's nothing left
- * to clean up client-side beyond refreshing the list.
+ * to clean up client-side beyond the context updating its own list.
  */
 export default function KnowledgeBase() {
-  const [docs, setDocs] = useState([]);
+  const { documents, deleteDocument } = useDocuments();
   const [selected, setSelected] = useState(null);
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState("");
   const [deletingId, setDeletingId] = useState(null);
-
-  useEffect(() => {
-    refresh();
-  }, []);
-
-  async function refresh() {
-    const data = await apiGet("/documents");
-    setDocs(data);
-  }
 
   function openSelected() {
     setSelected(null);
@@ -59,8 +59,7 @@ export default function KnowledgeBase() {
     if (!window.confirm(`Delete "${doc.source_name}"? This can't be undone.`)) return;
     setDeletingId(doc.id);
     try {
-      await apiDelete(`/documents/${doc.id}`);
-      setDocs((prev) => prev.filter((d) => d.id !== doc.id));
+      await deleteDocument(doc.id);
       if (selected?.id === doc.id) setSelected(null);
     } catch (err) {
       setOpenError("Couldn't delete this document. Please try again.");
@@ -76,13 +75,22 @@ export default function KnowledgeBase() {
       </div>
 
       <div className="doc-list">
-        {docs.map((d) => (
+        {documents.map((d) => (
           <div key={d.id} className="doc-row doc-row-clickable" onClick={() => setSelected(d)}>
             <div className="doc-row-left">
               <div className="doc-icon">{TYPE_LABEL[d.source_type]}</div>
               <div style={{ minWidth: 0 }}>
                 <div className="doc-name">{d.source_name}</div>
-                <div className="doc-sub">Added {new Date(d.uploaded_at).toLocaleDateString()}</div>
+                <div className="doc-sub">
+                  {d.status === "processing" && (
+                    <span className="doc-status-processing">
+                      <span className="doc-status-spinner" aria-hidden="true" />
+                      Processing…
+                    </span>
+                  )}
+                  {d.status === "failed" && <span style={{ color: "var(--danger)" }}>{d.error_message || "Failed to process"}</span>}
+                  {d.status === "ready" && `Added ${new Date(d.uploaded_at).toLocaleDateString()}`}
+                </div>
               </div>
             </div>
             <button
@@ -95,7 +103,7 @@ export default function KnowledgeBase() {
             </button>
           </div>
         ))}
-        {!docs.length && (
+        {!documents.length && (
           <p style={{ color: "var(--text-muted)", textAlign: "center", marginTop: 20 }}>
             No documents yet — add some from the Upload page.
           </p>
