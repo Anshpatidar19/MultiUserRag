@@ -2,6 +2,7 @@ import { useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { supabase } from "../api/supabase";
 import { useSessions } from "../context/SessionsContext";
+import { useDocuments } from "../context/DocumentsContext";
 import {
   ChatIcon,
   UploadIcon,
@@ -24,6 +25,10 @@ export default function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
   const navigate = useNavigate();
   const { sessions, activeId, setActiveId, createSession, renameSession, deleteSession } = useSessions();
+  // Read here (rather than just on Upload/Knowledge Base) so a document
+  // that's still being chunked/embedded is visible from every page,
+  // including Chat -- the sidebar is the one thing mounted everywhere.
+  const { processingCount } = useDocuments();
 
   async function handleLogout() {
     await supabase.auth.signOut();
@@ -64,9 +69,24 @@ export default function Sidebar() {
       <ul className="nav-list">
         {NAV_ITEMS.map(({ to, label, icon: Icon }) => (
           <li key={to}>
-            <NavLink to={to} className={({ isActive }) => `nav-item${isActive ? " active" : ""}`} title={label}>
+            <NavLink
+              to={to}
+              className={({ isActive }) => `nav-item${isActive ? " active" : ""}`}
+              title={
+                to === "/knowledge-base" && processingCount > 0
+                  ? `${label} (${processingCount} processing)`
+                  : label
+              }
+            >
               <Icon width={17} height={17} />
-              {!collapsed && label}
+              {!collapsed && (
+                <span style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, minWidth: 0 }}>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+                  {to === "/knowledge-base" && processingCount > 0 && (
+                    <span className="nav-badge">{processingCount}</span>
+                  )}
+                </span>
+              )}
             </NavLink>
           </li>
         ))}

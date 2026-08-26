@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { apiGet, apiUpload, apiPost } from "../api/client";
+import { useRef, useState } from "react";
+import { useDocuments } from "../context/DocumentsContext";
 import { UploadIcon } from "../components/Icons";
 
 const TYPE_LABEL = { pdf: "PDF", image: "IMG", csv: "CSV", youtube: "YT", docx: "DOC" };
@@ -8,40 +8,35 @@ const TYPE_LABEL = { pdf: "PDF", image: "IMG", csv: "CSV", youtube: "YT", docx: 
  * Upload workflow lives here, separate from the read-only Knowledge
  * Base view. The doc list below the upload zone exists to confirm
  * ingestion worked -- it shows name + chunk count so the person can see
- * their document was actually indexed, without the status pill/delete
- * controls that belong to a management view rather than an upload flow.
+ * their document was actually indexed, without the delete control that
+ * belongs to a management view rather than an upload flow.
+ *
+ * Documents come from the shared DocumentsContext rather than a local
+ * fetch: the upload endpoints now return as soon as a "processing" row
+ * exists (the actual chunk/embed work happens afterwards in the
+ * background -- see routers/documents.py), and the context's poll picks
+ * up the "ready"/"failed" transition on its own. That's what makes a
+ * freshly-dropped file show up here immediately instead of only after
+ * the whole ingestion pipeline finishes.
+ *
  * A failed ingestion still surfaces its error inline (fail loudly, per
  * the ingestion pipeline's design) since silently hiding failures would
  * be worse than a slightly busier upload list.
  */
 export default function Upload() {
-  const [docs, setDocs] = useState([]);
+  const { documents, uploadFiles, addYoutube } = useDocuments();
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const fileInputRef = useRef(null);
 
-  useEffect(() => {
-    refresh();
-  }, []);
-
-  async function refresh() {
-    const data = await apiGet("/documents");
-    setDocs(data);
-  }
-
   async function handleFiles(files) {
+    if (!files.length) return;
     setError("");
     setBusy(true);
-    for (const file of files) {
-      try {
-        await apiUpload("/documents/upload", file);
-      } catch (err) {
-        setError(`${file.name}: ${err.message}`);
-      }
-    }
+    const errors = await uploadFiles(files);
+    if (errors.length) setError(errors.join(" · "));
     setBusy(false);
-    refresh();
   }
 
   async function handleYoutube() {
@@ -49,13 +44,12 @@ export default function Upload() {
     setError("");
     setBusy(true);
     try {
-      await apiPost("/documents/youtube", { url: youtubeUrl });
+      await addYoutube(youtubeUrl);
       setYoutubeUrl("");
     } catch (err) {
       setError(err.message);
     }
     setBusy(false);
-    refresh();
   }
 
   return (
@@ -83,7 +77,10 @@ export default function Upload() {
           multiple
           accept=".pdf,.docx,.csv,.png,.jpg,.jpeg"
           style={{ display: "none" }}
-          onChange={(e) => handleFiles(Array.from(e.target.files))}
+          onChange={(e) => {
+            handleFiles(Array.from(e.target.files));
+            e.target.value = "";
+          }}
         />
 
         <div style={{ marginTop: 22, display: "flex", gap: 8, justifyContent: "center" }}>
@@ -99,7 +96,7 @@ export default function Upload() {
         </div>
       </div>
 
-      {busy && <p style={{ color: "var(--text-secondary)", marginTop: 14 }}>Processing…</p>}
+      {busy && <p style={{ color: "var(--text-secondary)", marginTop: 14 }}>Uploading…</p>}
       {error && (
         <div style={{ background: "var(--danger-soft)", color: "var(--danger)", padding: "10px 14px", borderRadius: 8, fontSize: 13, marginTop: 14 }}>
           {error}
@@ -107,7 +104,7 @@ export default function Upload() {
       )}
 
       <div className="doc-list">
-        {docs.map((d) => (
+        {documents.map((d) => (
           <div key={d.id} className="doc-row">
             <div className="doc-row-left">
               <div className="doc-icon">{TYPE_LABEL[d.source_type]}</div>
@@ -115,14 +112,19 @@ export default function Upload() {
                 <div className="doc-name">{d.source_name}</div>
                 <div className="doc-sub">
                   {d.status === "ready" && `${d.chunk_count} chunks`}
-                  {d.status === "processing" && "Processing…"}
+                  {d.status === "processing" && (
+                    <span className="doc-status-processing">
+                      <span className="doc-status-spinner" aria-hidden="true" />
+                      Processing…
+                    </span>
+                  )}
                   {d.status === "failed" && <span style={{ color: "var(--danger)" }}>{d.error_message || "Failed to process"}</span>}
                 </div>
               </div>
             </div>
           </div>
         ))}
-        {!docs.length && <p style={{ color: "var(--text-muted)", textAlign: "center", marginTop: 20 }}>No documents uploaded yet.</p>}
+        {!documents.length && <p style={{ color: "var(--text-muted)", textAlign: "center", marginTop: 20 }}>No documents uploaded yet.</p>}
       </div>
     </div>
   );
