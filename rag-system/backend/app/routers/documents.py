@@ -17,12 +17,29 @@ guarantee that covers the Postgres tables also covers the raw files
 private; the only way to read a file back out is the signed URL minted
 by GET /documents/{id}/url, which is short-lived and still goes through
 `get_current_user` + a user_id-owner check first.
+
+Async ingestion: chunk/embed/upsert (loaders.py + embeddings.py) makes
+several outbound network calls (OCR, embeddings, vision fallback) and
+can easily take from several seconds up to a minute or more for a large
+PDF. That work used to run inline before the request returned, which
+meant (a) the browser's upload spinner sat there for the full duration
+with nothing in the Knowledge Base / Upload lists to show for it, and
+(b) it blocked FastAPI's event loop for every other user's request in
+the meantime, since `ingest_file` is a plain synchronous function.
+Both endpoints below now do only the fast part inline -- store the raw
+file, insert the "processing" row -- and return immediately so the
+document shows up in the UI right away. The actual pipeline run is
+handed to `BackgroundTasks`, which (for a sync callable) Starlette runs
+in a worker thread rather than on the event loop, so it no longer stalls
+other requests either. The frontend polls GET /documents while anything
+is "processing" (see DocumentsContext.jsx) to pick up "ready"/"failed"
+once the background task finishes.
 """
 
 import mimetypes
 import uuid
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 
 from app.auth import CurrentUser, get_current_user
 from app.config import get_settings
@@ -83,14 +100,20 @@ def _storage_path(user_id: str, document_id: str, filename: str) -> str:
     return f"{user_id}/{document_id}-{filename}"
 
 
-async def _run_ingestion(
+def _create_processing_row(
     user: CurrentUser,
     *,
     source_name: str,
     source_type: str,
     file_bytes: bytes | None = None,
-    youtube_url: str | None = None,
-):
+) -> tuple[str, str | None]:
+    """
+    The fast, synchronous half of ingestion: store the raw file (if any)
+    and insert the `documents` row with status "processing". Runs inline
+    on the request so the row -- and therefore the document -- exists
+    the instant the endpoint returns, before any chunking/embedding has
+    happened.
+    """
     document_id = str(uuid.uuid4())
     storage_path = None
 
@@ -124,6 +147,24 @@ async def _run_ingestion(
         }
     ).execute()
 
+    return document_id, storage_path
+
+
+def _process_ingestion(
+    user: CurrentUser,
+    *,
+    document_id: str,
+    source_name: str,
+    source_type: str,
+    file_bytes: bytes | None = None,
+    youtube_url: str | None = None,
+):
+    """
+    The slow half: load -> chunk -> embed -> upsert, then flip the row to
+    "ready"/"failed". Runs as a BackgroundTask (i.e. in a worker thread,
+    after the response for the upload request has already been sent) so
+    it neither blocks the client nor the event loop for other users.
+    """
     try:
         result = ingest_file(
             db=user.db,
@@ -139,13 +180,16 @@ async def _run_ingestion(
         user.db.table("documents").update(
             {"status": "failed", "error_message": str(exc)}
         ).eq("id", document_id).execute()
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+        return
+    except Exception as exc:  # noqa: BLE001 - never leave a row stuck "processing" forever
+        user.db.table("documents").update(
+            {"status": "failed", "error_message": f"Unexpected error: {exc}"}
+        ).eq("id", document_id).execute()
+        return
 
     user.db.table("documents").update(
         {"status": "ready", "chunk_count": result.chunk_count}
     ).eq("id", document_id).execute()
-
-    return document_id, result.chunk_count
 
 
 @router.get("", response_model=list[DocumentOut])
@@ -155,20 +199,44 @@ async def list_documents(user: CurrentUser = Depends(get_current_user)):
 
 
 @router.post("/upload", response_model=DocumentOut, status_code=status.HTTP_201_CREATED)
-async def upload_document(file: UploadFile = File(...), user: CurrentUser = Depends(get_current_user)):
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    user: CurrentUser = Depends(get_current_user),
+):
     source_type = _source_type_from_filename(file.filename)
     file_bytes = await file.read()
-    document_id, chunk_count = await _run_ingestion(
+    document_id, _storage_path = _create_processing_row(
         user, source_name=file.filename, source_type=source_type, file_bytes=file_bytes
+    )
+    background_tasks.add_task(
+        _process_ingestion,
+        user,
+        document_id=document_id,
+        source_name=file.filename,
+        source_type=source_type,
+        file_bytes=file_bytes,
     )
     row = user.db.table("documents").select("*").eq("id", document_id).single().execute()
     return row.data
 
 
 @router.post("/youtube", response_model=DocumentOut, status_code=status.HTTP_201_CREATED)
-async def upload_youtube(body: YoutubeIngestRequest, user: CurrentUser = Depends(get_current_user)):
-    document_id, chunk_count = await _run_ingestion(
-        user, source_name=body.url, source_type="youtube", youtube_url=body.url
+async def upload_youtube(
+    body: YoutubeIngestRequest,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = Depends(get_current_user),
+):
+    document_id, _storage_path = _create_processing_row(
+        user, source_name=body.url, source_type="youtube"
+    )
+    background_tasks.add_task(
+        _process_ingestion,
+        user,
+        document_id=document_id,
+        source_name=body.url,
+        source_type="youtube",
+        youtube_url=body.url,
     )
     row = user.db.table("documents").select("*").eq("id", document_id).single().execute()
     return row.data

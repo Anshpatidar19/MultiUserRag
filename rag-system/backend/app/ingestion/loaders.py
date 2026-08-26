@@ -21,9 +21,7 @@ from PIL import Image
 from pypdf import PdfReader
 from pdf2image import convert_from_bytes
 from docx import Document as DocxDocument
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
-
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 
 class LoaderError(Exception):
     """Raised with a message safe to show directly to the user."""
@@ -133,13 +131,25 @@ def _extract_video_id(url: str) -> str:
 def load_youtube(url: str) -> str:
     video_id = _extract_video_id(url)
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        ytt_api = YouTubeTranscriptApi()
+        transcript = ytt_api.fetch(video_id)
     except TranscriptsDisabled as exc:
         raise LoaderError("Transcripts are disabled for this video.") from exc
     except NoTranscriptFound as exc:
         raise LoaderError("No transcript is available for this video.") from exc
+    except Exception as exc:  # noqa: BLE001
+        # YouTube has been increasingly rate-limiting/blocking automated
+        # transcript requests (a known, ongoing issue -- see
+        # https://github.com/jdepoix/youtube-transcript-api/issues/429).
+        # Surface this as a clear, actionable message instead of a raw
+        # XML parse error, since it's not something the user's URL did wrong.
+        raise LoaderError(
+            "Could not fetch this video's transcript -- YouTube may be "
+            "rate-limiting automated requests right now. Try again in a "
+            "few minutes, or try a different video."
+        ) from exc
 
-    full_text = " ".join(chunk["text"] for chunk in transcript if chunk["text"].strip())
+    full_text = " ".join(snippet.text for snippet in transcript if snippet.text.strip())
     if not full_text.strip():
         raise LoaderError("Transcript was empty.")
     return full_text

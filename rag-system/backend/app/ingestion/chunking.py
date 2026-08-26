@@ -62,7 +62,7 @@ def _pack(units: list[str], chunk_size: int, overlap: int) -> list[str]:
     return chunks
 
 
-def chunk_text(text: str, chunk_size: int = 800, overlap: int = 120) -> list[Chunk]:
+def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200) -> list[Chunk]:
     """
     chunk_size / overlap are in characters, not tokens -- simpler to
     reason about and good enough given the embedding model's short
