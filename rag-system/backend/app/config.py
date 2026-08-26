@@ -2,7 +2,7 @@
 config.py
 
 Centralized settings loaded from environment variables. Every external
-service (Supabase, Pinecone, Groq, Langfuse) needs credentials, and we
+service (Supabase, Pinecone, Gemini, Langfuse) needs credentials, and we
 want a single, obvious place to see what's required rather than env
 lookups scattered across modules. Pydantic's BaseSettings also gives us
 fail-fast behavior: the app refuses to boot with a clear error if a
@@ -25,9 +25,15 @@ class Settings(BaseSettings):
     pinecone_index_name: str = "rag-multitenant"
     pinecone_environment: str = "us-east-1"
 
-    # --- LLM (Groq, OpenAI-compatible) ---
-    groq_api_key: str
-    groq_model: str = "llama-3.3-70b-versatile"
+    # --- LLM (Gemini, via the google-genai SDK) ---
+    # One model handles both chat generation and image description --
+    # Gemini's models are natively multimodal, unlike the old Groq setup
+    # which needed a separate vision-only model. Gemini model names move
+    # fast; check https://ai.google.dev/gemini-api/docs/models for the
+    # current recommended flash-tier model if this one starts erroring
+    # or gets deprecated.
+    gemini_api_key: str
+    gemini_model: str = "gemini-3.6-flash"
 
     # --- Embeddings (local, no external API) ---
     embedding_model_name: str = "all-MiniLM-L6-v2"

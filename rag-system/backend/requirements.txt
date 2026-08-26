@@ -6,7 +6,7 @@ supabase==2.7.4
 pinecone==5.0.1
 sentence-transformers==3.1.1
 rank-bm25==0.2.2
-groq==0.11.0
+google-genai==2.20.0
 langfuse==2.53.0
 pypdf==4.3.1
 pdf2image==1.17.0

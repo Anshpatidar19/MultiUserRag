@@ -1,7 +1,14 @@
 """
 client.py
 
-Groq chat generation via its OpenAI-compatible SDK, with streaming.
+Gemini generation via Google's official `google-genai` SDK (the current
+recommended package -- NOT the older, now-superseded
+`google-generativeai`), with streaming.
+
+Gemini's models are natively multimodal, so unlike the previous
+Groq-based implementation -- which needed a separate vision-only model
+for image description, since its main chat model was text-only -- both
+text chat and image description here run through the SAME model.
 
 DESIGN DECISION -- agentic vs. hard-gated (spec section 4):
 This system defaults to AGENTIC (settings.generation_mode == "agentic"):
@@ -26,14 +33,15 @@ documented here rather than hardcoded.
 
 from collections.abc import Iterator
 
-from groq import Groq
+from google import genai
+from google.genai import types
 
 from app.config import get_settings
 from app.retrieval.hybrid import RetrievedChunk
 
 settings = get_settings()
 
-_client = Groq(api_key=settings.groq_api_key)
+_client = genai.Client(api_key=settings.gemini_api_key)
 
 SYSTEM_PROMPT = """You are a retrieval-augmented assistant. You are given CONTEXT \
 retrieved from the user's private knowledge base. Answer the user's question.
@@ -72,6 +80,28 @@ def is_small_talk(message: str) -> bool:
     return normalized in greetings or len(normalized.split()) <= 2 and any(g in normalized for g in greetings)
 
 
+def _history_to_gemini(history: list[dict]) -> list[types.Content]:
+    """
+    Maps this app's stored {"role": "user"|"assistant", "content": str}
+    turns (see chat_messages, constrained to those two role values by
+    supabase/schema.sql) onto Gemini's Content objects.
+
+    Two things don't carry over directly from the old OpenAI-style
+    format:
+    - Gemini has no "assistant" role -- a prior model turn is
+      role="model".
+    - Gemini has no "system" role in the contents list at all; the
+      system prompt is passed separately via
+      GenerateContentConfig.system_instruction (see stream_answer
+      below), not as a message here.
+    """
+    mapped = []
+    for turn in history[-6:]:  # bounded recent history for multi-turn continuity
+        role = "model" if turn["role"] == "assistant" else "user"
+        mapped.append(types.Content(role=role, parts=[types.Part.from_text(text=turn["content"])]))
+    return mapped
+
+
 def stream_answer(
     *,
     question: str,
@@ -86,48 +116,45 @@ def stream_answer(
         else "\nRespond in the same language the user wrote their message in (auto-detect; supports at least English and Hindi)."
     )
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + lang_instruction}]
-    messages.extend(history[-6:])  # bounded recent history for multi-turn continuity
-    messages.append(
-        {
-            "role": "user",
-            "content": f"CONTEXT:\n{context_block}\n\nQUESTION:\n{question}",
-        }
+    contents = _history_to_gemini(history)
+    contents.append(
+        types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=f"CONTEXT:\n{context_block}\n\nQUESTION:\n{question}")],
+        )
     )
 
-    stream = _client.chat.completions.create(
-        model=settings.groq_model,
-        messages=messages,
-        stream=True,
-        temperature=0.2,
+    stream = _client.models.generate_content_stream(
+        model=settings.gemini_model,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT + lang_instruction,
+            temperature=0.2,
+        ),
     )
-    for event in stream:
-        delta = event.choices[0].delta.content
-        if delta:
-            yield delta
+    for chunk in stream:
+        if chunk.text:
+            yield chunk.text
 
 
 def describe_image_with_vision(image_bytes: bytes) -> str:
     """
     Fallback used by ingestion/pipeline.py when OCR extracts nothing
-    from an uploaded image (e.g. a photo/diagram with no text) -- asks a
-    vision-capable Groq model to produce a searchable description so the
-    image's *content* is still retrievable, not just literal text in it.
-    """
-    import base64
+    from an uploaded image (e.g. a photo/diagram with no text) -- asks
+    Gemini to produce a searchable description so the image's *content*
+    is still retrievable, not just literal text in it.
 
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    resp = _client.chat.completions.create(
-        model="qwen/qwen3.6-27b",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Describe this image in detail for search indexing."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                ],
-            }
+    Uses the same `gemini_model` as chat -- no separate vision-only
+    model needed, since Gemini's models are natively multimodal (unlike
+    the old Groq setup, which required switching to a distinct
+    vision-capable model and was the source of a "content must be a
+    string" 400 error when that switch was missed).
+    """
+    resp = _client.models.generate_content(
+        model=settings.gemini_model,
+        contents=[
+            types.Part.from_text(text="Describe this image in detail for search indexing."),
+            types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
         ],
     )
-    return resp.choices[0].message.content or ""
-
+    return resp.text or ""
