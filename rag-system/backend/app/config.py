@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # current recommended flash-tier model if this one starts erroring
     # or gets deprecated.
     gemini_api_key: str
-    gemini_model: str = "gemini-3.1-flash-lite"
+    gemini_model: str = "gemini-3.6-flash"
 
     # --- Embeddings (local, no external API) ---
     embedding_model_name: str = "all-MiniLM-L6-v2"
@@ -49,7 +49,18 @@ class Settings(BaseSettings):
     # before reranking, the reranker would only ever get to reorder an
     # already-too-narrow set and could never rescue a chunk RRF dropped.
     retrieval_rerank_pool: int = 15
-    retrieval_top_k: int = 6
+    retrieval_top_k: int = 3
+    # Minimum cross-encoder relevance score a chunk must clear to survive
+    # into the final answer context. ms-marco-MiniLM-L-6-v2 outputs a
+    # relevance logit, not a 0..1 probability -- scores well above 0
+    # indicate a genuine match, scores near/below 0 indicate the pair is
+    # essentially unrelated. This is what stops an unrelated document
+    # (e.g. a large book that happens to share one keyword with the
+    # query) from filling the top-k purely because RRF's rank-based
+    # fusion has no way to express "not actually relevant," only
+    # "ranked lower." Only applied when rerank_score is populated (i.e.
+    # the cross-encoder actually loaded) -- see retrieval/rerank.py.
+    retrieval_min_rerank_score: float = -2.0
     bm25_cache_ttl_seconds: int = 600  # 10 min; invalidated early on upload/delete
 
     # --- Confidence gating ---

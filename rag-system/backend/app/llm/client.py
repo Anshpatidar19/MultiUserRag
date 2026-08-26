@@ -144,16 +144,41 @@ def describe_image_with_vision(image_bytes: bytes) -> str:
     Gemini to produce a searchable description so the image's *content*
     is still retrievable, not just literal text in it.
 
+    The prompt below is deliberately more specific than a bare "describe
+    this image" would be. A generic description (e.g. "a person stands
+    near an ornate sandstone building with domes") is visually accurate
+    but omits the ONE detail later identity questions actually search
+    for -- the landmark's name -- because nothing in a generic prompt
+    asks the model to commit to an identification. Since this caption is
+    generated once at upload time and is the ONLY thing chat retrieval
+    can ever search against for this image (chat itself has no image
+    input -- see ChatRequest in models.py), it has to front-load
+    identification now or "is this X" / "which monument is this"
+    questions will never find a match later.
+
     Uses the same `gemini_model` as chat -- no separate vision-only
     model needed, since Gemini's models are natively multimodal (unlike
     the old Groq setup, which required switching to a distinct
     vision-capable model and was the source of a "content must be a
     string" 400 error when that switch was missed).
     """
+    prompt = (
+        "Describe this image in detail for search indexing. Then, if the image "
+        "shows a recognizable landmark, monument, statue, building, or place, "
+        "state its specific name explicitly (e.g. \"This is the Albert Hall "
+        "Museum in Jaipur\" or \"This is the Statue of Unity, Gujarat\") -- do "
+        "not just describe its architecture generically. If unsure of the exact "
+        "name, give your best guess and say it's uncertain, rather than omitting "
+        "a name entirely. If people are visible, note where they are standing, "
+        "facing, or looking relative to any landmark or notable object in the "
+        "frame (e.g. \"a person in a white shirt is looking toward the statue "
+        "in the background\"), since viewers may later ask what someone in the "
+        "photo is looking at."
+    )
     resp = _client.models.generate_content(
         model=settings.gemini_model,
         contents=[
-            types.Part.from_text(text="Describe this image in detail for search indexing."),
+            types.Part.from_text(text=prompt),
             types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
         ],
     )

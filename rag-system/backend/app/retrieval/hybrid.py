@@ -34,6 +34,15 @@ class RetrievedChunk:
     rrf_score: float
     dense_score: float | None
     bm25_score: float | None
+    # Set by retrieval/rerank.py after the cross-encoder pass. None until
+    # then (or permanently, if the reranker model failed to load -- see
+    # rerank.py). Deliberately distinct from rrf_score: RRF only encodes
+    # *rank order* within this query's pool, not a real relevance
+    # magnitude, so a low rrf_score does NOT reliably mean "not relevant"
+    # -- it can just mean "a much bigger document in the corpus produced
+    # more candidates." The cross-encoder score is an actual (query, chunk)
+    # relevance judgment and is what chat.py filters noise on.
+    rerank_score: float | None = None
 
 
 def _fetch_user_corpus(db, user_id: str) -> list[dict]:
