@@ -54,11 +54,13 @@ export async function apiUpload(path, file) {
 
 /**
  * Streams a chat response via SSE (fetch + ReadableStream, since
- * EventSource doesn't support auth headers). Invokes onToken for each
- * streamed delta and onDone once with the final citations/confidence
- * payload -- see backend app/routers/chat.py for the event shapes.
+ * EventSource doesn't support auth headers). Invokes onStatus for each
+ * pipeline-stage update (e.g. "Searching your documents…"), onToken for
+ * each streamed answer delta, and onDone once with the final
+ * citations/confidence payload -- see backend app/routers/chat.py for
+ * the event shapes.
  */
-export async function streamChat({ sessionId, message, language }, { onToken, onDone, onError }) {
+export async function streamChat({ sessionId, message, language }, { onStatus, onToken, onDone, onError }) {
   try {
     const headers = await authHeaders();
     const res = await fetch(`${BASE}/chat`, {
@@ -82,7 +84,8 @@ export async function streamChat({ sessionId, message, language }, { onToken, on
         const line = part.trim();
         if (!line.startsWith("data:")) continue;
         const payload = JSON.parse(line.slice(5).trim());
-        if (payload.type === "token") onToken(payload.content);
+        if (payload.type === "status") onStatus?.(payload.message);
+        else if (payload.type === "token") onToken(payload.content);
         else if (payload.type === "done") onDone(payload);
       }
     }
