@@ -27,6 +27,22 @@ class LoaderError(Exception):
     """Raised with a message safe to show directly to the user."""
 
 
+# Tesseract's default page-segmentation mode (PSM 3, "fully automatic")
+# tries to detect a page's layout and can decide a grid of numbers with
+# little surrounding prose -- e.g. a marksheet's marks-obtained columns --
+# isn't a real text block, and silently drops it instead of erroring.
+# Confirmed on a real scanned marksheet: PSM 3 extracted every subject
+# name but ZERO of the numeric marks; PSM 6 ("assume a single uniform
+# block of text") kept every row intact, e.g.
+# "ACCOUNTING (FINANCIAL ACCOUNTING) TH 085 85 28 047 047".
+# This is a silent failure -- OCR returns non-empty, plausible-looking
+# text, so nothing upstream (loader, chunker, ingestion) has any signal
+# that a whole column of data went missing. Applies to both the PDF-OCR
+# fallback and standalone image OCR below, since both hit the same
+# tesseract default otherwise.
+_OCR_CONFIG = "--psm 6"
+
+
 def load_pdf(file_bytes: bytes) -> str:
     """
     Try native text extraction first (fast, exact). If a page yields no
@@ -52,7 +68,7 @@ def load_pdf(file_bytes: bytes) -> str:
         images = convert_from_bytes(file_bytes)
         for i in ocr_needed_pages:
             if i < len(images):
-                ocr_text = pytesseract.image_to_string(images[i]).strip()
+                ocr_text = pytesseract.image_to_string(images[i], config=_OCR_CONFIG).strip()
                 text_parts[i] = ocr_text
 
     full_text = "\n\n".join(t for t in text_parts if t)
@@ -73,7 +89,7 @@ def load_image(file_bytes: bytes) -> str:
     pipeline.py since it needs the LLM client, not here.
     """
     image = Image.open(io.BytesIO(file_bytes))
-    ocr_text = pytesseract.image_to_string(image).strip()
+    ocr_text = pytesseract.image_to_string(image, config=_OCR_CONFIG).strip()
     return ocr_text  # may be empty string; pipeline decides what to do next
 
 

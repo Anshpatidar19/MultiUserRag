@@ -21,6 +21,7 @@ instance; a multi-instance deployment would swap this for Redis with the
 same per-user-key contract.
 """
 
+import re
 import time
 from dataclasses import dataclass
 from rank_bm25 import BM25Okapi
@@ -28,6 +29,8 @@ from rank_bm25 import BM25Okapi
 from app.config import get_settings
 
 settings = get_settings()
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 @dataclass
@@ -44,7 +47,13 @@ _CACHE: dict[str, _CacheEntry] = {}
 
 
 def _tokenize(text: str) -> list[str]:
-    return text.lower().split()
+    # Regex word-extraction, not .split() -- a naive whitespace split left
+    # punctuation glued onto tokens (e.g. "SUBJECTS/PAPERS" became the
+    # single token "subjects/papers", which could never match a query
+    # token like "subject" or "subjects"). This mirrors the tokenizer
+    # llm/confidence.py already uses for lexical grounding, so indexing
+    # and grounding scoring stay consistent.
+    return _TOKEN_RE.findall(text.lower())
 
 
 def get_or_build(user_id: str, corpus_fetcher) -> _CacheEntry:

@@ -52,7 +52,14 @@ def _fetch_user_corpus(db, user_id: str) -> list[dict]:
 
 def hybrid_search(db, user_id: str, query_text: str) -> list[RetrievedChunk]:
     pool = settings.retrieval_candidate_pool
-    top_k = settings.retrieval_top_k
+    # NOTE: intentionally NOT retrieval_top_k here. We return the wider
+    # rerank pool so the cross-encoder in retrieval/rerank.py has real
+    # candidates to reorder. Truncating to top_k at this point would mean
+    # a chunk that only won on BM25 (and got diluted by RRF fusion against
+    # many mediocre dense matches) gets discarded before the reranker -- the
+    # one component that could correctly promote it -- ever sees it. The
+    # final top_k cut happens in routers/chat.py, AFTER rerank().
+    rerank_pool = settings.retrieval_rerank_pool
 
     # --- Dense: Pinecone, hard-scoped to this user's namespace ---
     query_emb = embeddings.embed_query(query_text)
@@ -106,4 +113,4 @@ def hybrid_search(db, user_id: str, query_text: str) -> list[RetrievedChunk]:
         )
 
     fused.sort(key=lambda c: c.rrf_score, reverse=True)
-    return fused[:top_k]
+    return fused[:rerank_pool]
