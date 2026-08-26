@@ -19,6 +19,10 @@ export default function Chat() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
+  // The live "what's happening right now" label shown while waiting for
+  // the first answer token -- e.g. "Searching your documents…". Cleared
+  // as soon as real content starts arriving.
+  const [statusMessage, setStatusMessage] = useState("");
   // Citations are hidden by default and only shown per-message on click.
   const [expandedSources, setExpandedSources] = useState({});
   // Tracks which message's answer is currently being read aloud, so the
@@ -118,6 +122,7 @@ export default function Chat() {
     setInput("");
     setStreaming(true);
     setStreamingText("");
+    setStatusMessage("Understanding your question…");
 
     if (isFirstMessage) {
       autoNameFromMessage(sessionId, question);
@@ -127,7 +132,11 @@ export default function Chat() {
     await streamChat(
       { sessionId, message: question, language: detectLanguage(question) },
       {
+        onStatus: (message) => {
+          setStatusMessage(message);
+        },
         onToken: (delta) => {
+          setStatusMessage(""); // real content has started arriving; cheap no-op once already cleared
           finalText += delta;
           setStreamingText((prev) => prev + delta);
         },
@@ -146,11 +155,13 @@ export default function Chat() {
           ]);
           setStreaming(false);
           setStreamingText("");
+          setStatusMessage("");
           shouldAutoScrollRef.current = true;
         },
         onError: () => {
           setStreaming(false);
           setStreamingText("");
+          setStatusMessage("");
         },
       }
     );
@@ -253,9 +264,18 @@ export default function Chat() {
 
         {streaming && (
           <div className="msg-row assistant">
-            <div className="msg-bubble assistant">
-              <ReactMarkdown>{streamingText || "…"}</ReactMarkdown>
-            </div>
+            {streamingText ? (
+              <div className="msg-bubble assistant">
+                <ReactMarkdown>{streamingText}</ReactMarkdown>
+              </div>
+            ) : (
+              <div className="thinking-indicator">
+                <span className="thinking-dot" />
+                <span className="thinking-dot" />
+                <span className="thinking-dot" />
+                <span className="thinking-label">{statusMessage || "Thinking…"}</span>
+              </div>
+            )}
           </div>
         )}
 
