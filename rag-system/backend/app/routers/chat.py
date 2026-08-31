@@ -2,13 +2,12 @@
 routers/chat.py
 
 The orchestration for a single turn: retrieve -> generate (streamed) ->
-score confidence -> persist -> trace. This is intentionally the one
-place that ties every other module together, per the "thin
-orchestration layer" non-functional requirement -- no retrieval,
-confidence, or generation logic lives in this file itself.
+score confidence -> persist -> trace.
 """
 
 import json
+import logging
+import time
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -24,6 +23,7 @@ from app.retrieval.rerank import rerank
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 def _load_history(db, session_id: str, user_id: str) -> list[dict]:
@@ -41,35 +41,21 @@ def _load_history(db, session_id: str, user_id: str) -> list[dict]:
 @router.post("")
 async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user)):
     branch = "small_talk" if is_small_talk(body.message) else "rag"
+    t0 = time.perf_counter()
+    logger.info("QUERY START | user=%s session=%s branch=%s | %r", user.id, body.session_id, branch, body.message)
 
     def event_stream():
         with query_trace(user_id=user.id, session_id=body.session_id, query=body.message, branch=branch) as trace:
-            # Persist the user's message first.
             user.db.table("chat_messages").insert(
                 {"session_id": body.session_id, "user_id": user.id, "role": "user", "content": body.message}
             ).execute()
 
-            # Status events tell the frontend which real pipeline stage is
-            # running, so the "thinking" indicator shows what's actually
-            # happening (searching, reading, generating) instead of a
-            # generic placeholder. These are cheap to emit -- just a few
-            # extra SSE lines before the token stream starts.
             chunks = []
             if branch == "rag":
                 yield f"data: {json.dumps({'type': 'status', 'message': 'Searching your documents…'})}\n\n"
                 with stage_span(trace, "retrieval", query=body.message) as span:
                     fused = hybrid_search(user.db, user.id, body.message)
                     reranked = rerank(body.message, fused)
-                    # Drop chunks the cross-encoder judged genuinely
-                    # irrelevant BEFORE taking the top_k slice. Without
-                    # this, "top 3 by rank" can mean "the 3 least-bad
-                    # options in a pool that contains nothing actually
-                    # relevant" -- e.g. a huge unrelated document
-                    # statistically out-competing a small relevant one on
-                    # RRF's rank fusion, even though the cross-encoder
-                    # correctly scores it as unrelated. Chunks with no
-                    # rerank_score (reranker unavailable) are kept as-is,
-                    # since there's no signal to filter on in that case.
                     filtered = [
                         c
                         for c in reranked
@@ -77,8 +63,20 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
                     ]
                     chunks = filtered[: settings.retrieval_top_k]
                     span.update(output={"retrieved": [c.text[:200] for c in chunks]})
+
+                    logger.info(
+                        "RETRIEVAL SUMMARY | fused=%d -> reranked=%d -> above_threshold(%.2f)=%d -> final_top_k=%d",
+                        len(fused), len(reranked), settings.retrieval_min_rerank_score, len(filtered), len(chunks),
+                    )
+                    for i, c in enumerate(chunks):
+                        logger.info(
+                            "  chunk #%d | source=%r | rrf=%.4f | rerank=%s",
+                            i + 1, c.source_name, c.rrf_score,
+                            f"{c.rerank_score:.4f}" if c.rerank_score is not None else "n/a",
+                        )
                 yield f"data: {json.dumps({'type': 'status', 'message': 'Reading relevant sources…'})}\n\n"
             else:
+                logger.info("SMALL TALK branch — retrieval skipped for this query.")
                 yield f"data: {json.dumps({'type': 'status', 'message': 'Thinking…'})}\n\n"
 
             history = _load_history(user.db, body.session_id, user.id)
@@ -108,7 +106,6 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
                 for c in chunks
             ]
 
-            # Persist the assistant turn.
             user.db.table("chat_messages").insert(
                 {
                     "session_id": body.session_id,
@@ -122,6 +119,12 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
             user.db.table("chat_sessions").update({"last_active_at": "now()"}).eq(
                 "id", body.session_id
             ).eq("user_id", user.id).execute()
+
+            elapsed = time.perf_counter() - t0
+            logger.info(
+                "QUERY DONE | user=%s session=%s | chunks_used=%d | confidence=%.2f (%s) | grounded=%s | %.2fs",
+                user.id, body.session_id, len(chunks), confidence.score, confidence.label, grounded, elapsed,
+            )
 
             yield f"data: {json.dumps({'type': 'done', 'citations': citations, 'confidence_score': confidence.score, 'confidence_label': confidence.label, 'grounded': grounded})}\n\n"
 
