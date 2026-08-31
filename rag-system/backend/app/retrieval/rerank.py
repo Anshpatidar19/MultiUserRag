@@ -51,16 +51,13 @@ def _get_reranker():
 def rerank(query: str, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
     model = _get_reranker()
     if model is None or not chunks:
+        logger.info("RERANK skipped (model unavailable or 0 candidate chunks) | candidates=%d", len(chunks))
         return chunks
 
     pairs = [(query, c.text) for c in chunks]
     scores = model.predict(pairs)
     order = sorted(range(len(chunks)), key=lambda i: scores[i], reverse=True)
-    # Attach the real score to each chunk (not just use it for sorting)
-    # so chat.py can filter out chunks the cross-encoder judged
-    # genuinely irrelevant, instead of only ever getting a reordering of
-    # whatever candidates RRF happened to surface.
-    return [
+    result = [
         RetrievedChunk(
             document_id=chunks[i].document_id,
             source_name=chunks[i].source_name,
@@ -72,3 +69,8 @@ def rerank(query: str, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
         )
         for i in order
     ]
+    logger.info(
+        "RERANK | candidates=%d | top_score=%.4f | bottom_score=%.4f",
+        len(result), float(scores[order[0]]), float(scores[order[-1]]),
+    )
+    return result

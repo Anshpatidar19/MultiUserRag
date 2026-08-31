@@ -36,6 +36,7 @@ is "processing" (see DocumentsContext.jsx) to pick up "ready"/"failed"
 once the background task finishes.
 """
 
+import logging
 import mimetypes
 import uuid
 
@@ -51,6 +52,7 @@ from app.retrieval.bm25_cache import invalidate_user_cache
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 _EXT_TO_TYPE = {"pdf": "pdf", "csv": "csv", "docx": "docx", "png": "image", "jpg": "image", "jpeg": "image"}
 
@@ -130,6 +132,7 @@ def _create_processing_row(
                 {"content-type": _content_type_from_filename(source_name), "upsert": "true"},
             )
         except Exception as exc:  # noqa: BLE001 - surface as a clean error, not a 500
+            logger.error("Failed to store raw file for %r: %s", source_name, exc)
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY, f"Failed to store uploaded file: {exc}"
             ) from exc
@@ -146,6 +149,11 @@ def _create_processing_row(
             "storage_path": storage_path,
         }
     ).execute()
+
+    logger.info(
+        "Document row created | user=%s doc=%s source=%r type=%s status=processing",
+        user.id, document_id, source_name, source_type,
+    )
 
     return document_id, storage_path
 
@@ -177,16 +185,22 @@ def _process_ingestion(
             describe_image_fn=describe_image_with_vision,
         )
     except IngestionError as exc:
+        logger.error("Document %s (%r) FAILED: %s", document_id, source_name, exc)
         user.db.table("documents").update(
             {"status": "failed", "error_message": str(exc)}
         ).eq("id", document_id).execute()
         return
     except Exception as exc:  # noqa: BLE001 - never leave a row stuck "processing" forever
+        logger.exception("Document %s (%r) FAILED unexpectedly", document_id, source_name)
         user.db.table("documents").update(
             {"status": "failed", "error_message": f"Unexpected error: {exc}"}
         ).eq("id", document_id).execute()
         return
 
+    logger.info(
+        "Document %s (%r) READY — %d chunks stored.",
+        document_id, source_name, result.chunk_count,
+    )
     user.db.table("documents").update(
         {"status": "ready", "chunk_count": result.chunk_count}
     ).eq("id", document_id).execute()
@@ -206,6 +220,10 @@ async def upload_document(
 ):
     source_type = _source_type_from_filename(file.filename)
     file_bytes = await file.read()
+    logger.info(
+        "Upload received | user=%s filename=%r type=%s size=%d bytes",
+        user.id, file.filename, source_type, len(file_bytes),
+    )
     document_id, _storage_path = _create_processing_row(
         user, source_name=file.filename, source_type=source_type, file_bytes=file_bytes
     )
@@ -227,6 +245,7 @@ async def upload_youtube(
     background_tasks: BackgroundTasks,
     user: CurrentUser = Depends(get_current_user),
 ):
+    logger.info("YouTube ingest requested | user=%s url=%r", user.id, body.url)
     document_id, _storage_path = _create_processing_row(
         user, source_name=body.url, source_type="youtube"
     )
@@ -267,6 +286,7 @@ async def get_document_url(document_id: str, user: CurrentUser = Depends(get_cur
             storage_path, _SIGNED_URL_TTL_SECONDS
         )
     except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to sign URL for doc %s: %s", document_id, exc)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Failed to sign URL: {exc}") from exc
 
     url = signed.get("signedURL") or signed.get("signed_url")
@@ -299,7 +319,8 @@ async def delete_document(document_id: str, user: CurrentUser = Depends(get_curr
             # Row/vectors are already gone -- don't fail the delete over
             # an orphaned storage object; it's harmless and can be swept
             # up later if needed.
-            pass
+            logger.warning("Failed to remove orphaned storage object %r for doc %s", storage_path, document_id)
 
     invalidate_user_cache(user.id)  # this user's corpus just changed -- don't serve stale BM25
+    logger.info("Document %s deleted | user=%s", document_id, user.id)
     return None

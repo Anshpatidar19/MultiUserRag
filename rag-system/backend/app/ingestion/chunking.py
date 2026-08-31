@@ -1,19 +1,8 @@
-"""
-chunking.py
-
-Recursive character-based splitter: try to break on paragraph boundaries
-first, then sentence boundaries, then word boundaries, only falling back
-to a hard character cut as a last resort. The point is that a chunk
-boundary landing mid-sentence is worse for embedding quality than a
-slightly-off-target chunk size, so we prefer "close to chunk_size but
-respects a natural boundary" over "exactly chunk_size."
-
-Configurable overlap keeps a sliding window of context between adjacent
-chunks so a fact split across a chunk boundary isn't lost to retrieval.
-"""
-
+import logging
 import re
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
 SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
@@ -31,11 +20,6 @@ def _split_on(text: str, pattern: re.Pattern) -> list[str]:
 
 
 def _pack(units: list[str], chunk_size: int, overlap: int) -> list[str]:
-    """
-    Greedily pack small units (paragraphs, sentences, or words) into
-    chunks up to chunk_size chars, carrying `overlap` chars of trailing
-    context forward into the next chunk.
-    """
     chunks: list[str] = []
     current = ""
 
@@ -50,8 +34,6 @@ def _pack(units: list[str], chunk_size: int, overlap: int) -> list[str]:
             tail = current[-overlap:] if overlap > 0 else ""
             current = f"{tail} {unit}".strip()
         else:
-            # Single unit longer than chunk_size (e.g. a huge sentence);
-            # hard-cut it rather than losing it entirely.
             for i in range(0, len(unit), chunk_size - overlap or chunk_size):
                 chunks.append(unit[i : i + chunk_size])
             current = ""
@@ -63,23 +45,15 @@ def _pack(units: list[str], chunk_size: int, overlap: int) -> list[str]:
 
 
 def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200) -> list[Chunk]:
-    """
-    chunk_size / overlap are in characters, not tokens -- simpler to
-    reason about and good enough given the embedding model's short
-    context window (all-MiniLM-L6-v2 truncates at 256 tokens anyway,
-    so we deliberately keep chunk_size well under a rough 4-chars/token
-    estimate for that limit).
-    """
     text = text.strip()
     if not text:
+        logger.warning("chunk_text() called with empty/whitespace-only text — returning 0 chunks.")
         return []
 
     paragraphs = _split_on(text, PARAGRAPH_SPLIT)
     if not paragraphs:
         paragraphs = [text]
 
-    # If a single paragraph is already too big, break it into sentences
-    # before packing, so we don't hard-cut mid-sentence unnecessarily.
     units: list[str] = []
     for para in paragraphs:
         if len(para) <= chunk_size:
@@ -89,4 +63,19 @@ def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200) -> list[Ch
             units.extend(sentences)
 
     raw_chunks = _pack(units, chunk_size, overlap)
-    return [Chunk(text=c, index=i) for i, c in enumerate(raw_chunks) if c.strip()]
+    chunks = [Chunk(text=c, index=i) for i, c in enumerate(raw_chunks) if c.strip()]
+
+    sizes = [len(c.text) for c in chunks]
+    logger.info(
+        "chunk_text(): input=%d chars -> %d paragraphs -> %d chunks "
+        "(chunk_size=%d, overlap=%d, avg_chunk_len=%d, min=%d, max=%d)",
+        len(text),
+        len(paragraphs),
+        len(chunks),
+        chunk_size,
+        overlap,
+        (sum(sizes) // len(sizes)) if sizes else 0,
+        min(sizes) if sizes else 0,
+        max(sizes) if sizes else 0,
+    )
+    return chunks
