@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # current recommended flash-tier model if this one starts erroring
     # or gets deprecated.
     gemini_api_key: str
-    gemini_model: str = "gemini-3.6-flash"
+    gemini_model: str = "gemini-3.1-flash-lite"
 
     # --- Embeddings (local, no external API) ---
     embedding_model_name: str = "all-MiniLM-L6-v2"

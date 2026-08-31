@@ -180,25 +180,51 @@ def describe_image_with_vision(
     """
     ocr_note = (
         f"\n\nOCR already extracted this text from the image (it may be "
-        f"partial, noisy, or just a watermark/label): \"{ocr_text.strip()}\". "
-        "Weave in anything genuinely useful from it, but do not just repeat "
-        "it back -- your job is to add the visual description and "
-        "identification below, which OCR cannot provide."
+        f"partial, noisy, or have misaligned rows/columns -- scanned "
+        f"tables and grids are exactly where OCR tends to garble which "
+        f"number belongs to which row): \"{ocr_text.strip()}\". Use it as "
+        "a hint for spellings/labels, but READ THE IMAGE YOURSELF for "
+        "anything structured (tables, forms, grids of numbers) rather "
+        "than trusting the OCR text's alignment -- your own reading of "
+        "the pixels is the more reliable source for which value belongs "
+        "to which row/column."
         if ocr_text.strip()
         else ""
     )
     prompt = (
-        "Describe this image in detail for search indexing. Then, if the image "
-        "shows a recognizable landmark, monument, statue, building, or place, "
-        "state its specific name explicitly (e.g. \"This is the Albert Hall "
-        "Museum in Jaipur\" or \"This is the Statue of Unity, Gujarat\") -- do "
-        "not just describe its architecture generically. If unsure of the exact "
-        "name, give your best guess and say it's uncertain, rather than omitting "
-        "a name entirely. If people are visible, note where they are standing, "
-        "facing, or looking relative to any landmark or notable object in the "
-        "frame (e.g. \"a person in a white shirt is looking toward the statue "
-        "in the background\"), since viewers may later ask what someone in the "
-        "photo is looking at." + ocr_note
+        "Look at this image carefully and produce a detailed, search-indexable "
+        "description. Cover EVERY one of the following that applies -- skip a "
+        "numbered point only if it genuinely doesn't apply to this image:\n\n"
+        "1. PEOPLE / GROUP PHOTOS: If any people are visible, state the exact "
+        "number of people in the image (count every visible person, including "
+        "partially visible or background ones -- if you are genuinely unsure "
+        "whether two people overlap into one, give your best count and say so, "
+        "e.g. \"approximately 7 people\"). Briefly describe each person's "
+        "relative position (e.g. \"left to right: ...\") and what they're doing, "
+        "facing, or looking at, since viewers will later ask things like "
+        "\"how many people are in this photo\" or \"who is looking at the camera.\"\n\n"
+        "2. TABLES, FORMS, MARKSHEETS, AND GRIDS OF NUMBERS: If the image contains "
+        "a table, form, marksheet, invoice, spreadsheet screenshot, or any grid "
+        "of labeled numbers, transcribe it as clean structured text, ONE ROW PER "
+        "LINE, preserving the exact association between each label and its "
+        "number(s) -- e.g. for a marksheet: \"Subject: Mathematics | Marks "
+        "Obtained: 85 | Maximum Marks: 100\". Read every digit directly off the "
+        "image pixel-by-pixel; do not guess or round. Include every row and every "
+        "column, and also state the total/aggregate/percentage/grade if one is "
+        "printed on the sheet. Double-check that no row's numbers have been "
+        "accidentally shifted onto a neighboring row.\n\n"
+        "3. LANDMARKS AND PLACES: If the image shows a recognizable landmark, "
+        "monument, statue, building, or place, state its specific name explicitly "
+        "(e.g. \"This is the Albert Hall Museum in Jaipur\" or \"This is the "
+        "Statue of Unity, Gujarat\") -- do not just describe its architecture "
+        "generically. If unsure of the exact name, give your best guess and say "
+        "it's uncertain, rather than omitting a name entirely. If people are "
+        "visible near a landmark, note where they are standing, facing, or "
+        "looking relative to it.\n\n"
+        "4. GENERAL SCENE: For anything not covered above (objects, animals, "
+        "diagrams, screenshots, charts, etc.), describe what's shown in enough "
+        "detail that someone could find this image later by searching for its "
+        "content." + ocr_note
     )
     resp = _client.models.generate_content(
         model=settings.gemini_model,
@@ -208,3 +234,38 @@ def describe_image_with_vision(
         ],
     )
     return resp.text or ""
+
+
+_LOG_SUMMARY_MAX_INPUT_CHARS = 6000
+
+
+def summarize_for_log(text: str) -> str:
+    """
+    Cheap, best-effort 2-3 sentence summary of a document's extracted
+    text, generated purely so `INGEST DONE` log lines (see
+    ingestion/pipeline.py) show a human-readable summary of *what was
+    actually uploaded* in the VS Code terminal, not just a char/chunk
+    count. Never raises -- ingestion must never fail because a nice-to-have
+    log line couldn't be generated; callers should wrap this in try/except
+    regardless, but it also fails soft internally as a second layer.
+    """
+    snippet = text.strip()[:_LOG_SUMMARY_MAX_INPUT_CHARS]
+    if not snippet:
+        return ""
+    try:
+        resp = _client.models.generate_content(
+            model=settings.gemini_model,
+            contents=[
+                types.Part.from_text(
+                    text=(
+                        "Summarize the following document content in 2-3 concise, "
+                        "factual sentences for a developer log (no preamble like "
+                        "\"This document is about\", just the summary itself):\n\n"
+                        f"{snippet}"
+                    )
+                ),
+            ],
+        )
+        return (resp.text or "").strip()
+    except Exception:  # noqa: BLE001 - logging-only helper, never break ingestion
+        return ""

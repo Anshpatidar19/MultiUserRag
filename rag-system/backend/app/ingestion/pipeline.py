@@ -12,6 +12,36 @@ concrete `error_message` instead of silently leaving a 0-chunk "ghost"
 document row that looks uploaded but is unqueryable -- a document a
 user can see in their sidebar but that never surfaces in an answer is a
 worse experience than an upload that visibly errors.
+
+OCR/VISION STRATEGY (changed -- see also loaders.py, llm/client.py):
+--------------------------------------------------------------------
+Previously, the vision-model fallback for images only ran when OCR
+extracted *less than ~40 characters* of text -- the assumption being
+"if OCR found a real amount of text, the image is basically a text
+document and OCR is good enough." That assumption broke down for
+EXACTLY the cases reported as broken:
+
+- Group photos with a caption/timestamp/watermark: OCR can return a
+  short-but-nonzero string, and even when it returns nothing, the old
+  code path never asked "how many people are in this photo" -- nothing
+  in the fallback description prompt asked for a count.
+- Marksheets/tables: a real marksheet often has PLENTY of OCR'd
+  characters (subject names, numbers) -- comfortably over the 40-char
+  gate -- so the vision fallback was skipped entirely even though
+  tesseract's column/row alignment for a grid of numbers is exactly
+  where it's least reliable (confirmed: PSM 3 dropped every mark
+  column outright; PSM 6 keeps the text but can still misalign long
+  rows). A "found enough characters" check has no way to know whether
+  those characters are still attached to the right row.
+
+Both cases need the SAME fix: run the vision-capable model on the
+actual image (or actual scanned page) every time, not just when OCR
+came up short. Gemini's models are natively multimodal, so this is a
+single extra call per image/scanned-page -- worth it for correctness,
+and it only affects background ingestion, never a user-facing request
+latency. The prompt itself (see llm/client.py::describe_image_with_vision)
+now explicitly asks for an exact people-count and for row-preserving
+table/marksheet transcription.
 """
 
 import logging
@@ -28,28 +58,120 @@ class IngestionError(Exception):
     pass
 
 
-# OCR on a real photo (as opposed to a scanned text document) very often
-# returns a *few* stray characters -- a watermark, a timestamp, noise
-# misread from a texture -- without returning nothing at all. The old
-# gate ("if not text.strip()") treated any non-empty OCR result as "this
-# image has usable text," which skipped the vision description entirely
-# and left the image indexed under a near-useless scrap. This threshold
-# means "OCR found less than a real sentence's worth of content," which
-# is a much better proxy for "this image actually needs a vision
-# description" than mere non-emptiness.
-_MIN_OCR_CHARS_BEFORE_SKIPPING_VISION = 40
-
-
 @dataclass
 class IngestionResult:
     chunk_count: int
 
 
 _LOADERS = {
-    "pdf": loaders.load_pdf,
     "csv": loaders.load_csv,
     "docx": loaders.load_docx,
 }
+
+
+def _load_source_text(
+    *,
+    source_type: str,
+    source_name: str,
+    file_bytes: bytes | None,
+    youtube_url: str | None,
+    describe_image_fn,
+) -> str:
+    """The `load` stage only -- returns raw extracted text, or raises LoaderError."""
+    if source_type == "youtube":
+        if not youtube_url:
+            raise loaders.LoaderError("Missing YouTube URL.")
+        return loaders.load_youtube(youtube_url)
+
+    if source_type == "image":
+        if file_bytes is None:
+            raise loaders.LoaderError("Missing image file.")
+        ocr_text = loaders.load_image(file_bytes)
+        if describe_image_fn is not None:
+            # Always run the vision model now (see module docstring) --
+            # OCR text length is not a reliable signal for "this image
+            # doesn't need a real visual read." OCR text is still passed
+            # in and folded into the result; it's just no longer the
+            # sole source of truth.
+            vision_text = describe_image_fn(file_bytes, ocr_text=ocr_text)
+            return f"{ocr_text}\n\n{vision_text}".strip() if ocr_text.strip() else vision_text
+        return ocr_text
+
+    if source_type == "pdf":
+        if file_bytes is None:
+            raise loaders.LoaderError("Missing file bytes for pdf.")
+        # describe_image_fn doubles as the per-page vision callback for
+        # scanned PDF pages -- same underlying Gemini call, just invoked
+        # per rendered page image instead of once on a whole photo. See
+        # loaders.load_pdf's docstring for why this matters for scanned
+        # marksheets specifically.
+        return loaders.load_pdf(file_bytes, describe_page_fn=describe_image_fn)
+
+    if source_type in _LOADERS:
+        if file_bytes is None:
+            raise loaders.LoaderError(f"Missing file bytes for {source_type}.")
+        return _LOADERS[source_type](file_bytes)
+
+    raise loaders.LoaderError(f"Unsupported source_type: {source_type}")
+
+
+def _log_ingestion_summary(
+    *,
+    document_id: str,
+    user_id: str,
+    source_name: str,
+    source_type: str,
+    text: str,
+    chunks: list,
+    vectors: list,
+    upserted: int,
+    elapsed: float,
+) -> None:
+    """
+    Prints a detailed, human-readable ingestion report to the console
+    running `uvicorn app.main:app --reload` (i.e. the VS Code terminal)
+    -- summary, metadata, and a per-chunk breakdown -- so you can see
+    exactly what got extracted and indexed for every upload without
+    digging through a database.
+
+    Best-effort only: a summary-generation failure (e.g. Gemini API
+    hiccup) must never fail the ingestion itself, so everything here is
+    wrapped defensively and falls back to a truncated-text preview.
+    """
+    from app.llm.client import summarize_for_log  # local import: avoids a
+    # module-level import cycle (llm/client.py doesn't import pipeline.py,
+    # but keeping this import local keeps pipeline.py's own import graph
+    # -- loaders/chunking/embeddings/vectorstore only -- easy to reason
+    # about at a glance).
+
+    try:
+        summary = summarize_for_log(text)
+    except Exception:  # noqa: BLE001 - logging helper, must never break ingestion
+        summary = ""
+    if not summary:
+        summary = text.strip().replace("\n", " ")[:300] + ("…" if len(text.strip()) > 300 else "")
+
+    embedding_dim = len(vectors[0]) if vectors else 0
+
+    logger.info("=" * 100)
+    logger.info("INGESTION SUMMARY — %s", source_name)
+    logger.info("-" * 100)
+    logger.info("  Document ID      : %s", document_id)
+    logger.info("  User ID          : %s", user_id)
+    logger.info("  Source type      : %s", source_type)
+    logger.info("  Extracted chars  : %d", len(text))
+    logger.info("  Chunk count      : %d", len(chunks))
+    logger.info("  Embedding dim    : %d", embedding_dim)
+    logger.info("  Vectors upserted : %d", upserted)
+    logger.info("  Time taken       : %.2fs", elapsed)
+    logger.info("-" * 100)
+    logger.info("  Summary          : %s", summary)
+    logger.info("-" * 100)
+    logger.info("  Chunk details (%d total):", len(chunks))
+    for c in chunks:
+        preview = c.text[:140].replace("\n", " ")
+        logger.info("    [chunk %03d] chars=%-5d | %r", c.index, len(c.text), preview)
+    logger.info("=" * 100)
 
 
 def ingest_file(
@@ -70,33 +192,13 @@ def ingest_file(
     )
 
     try:
-        if source_type == "youtube":
-            if not youtube_url:
-                raise loaders.LoaderError("Missing YouTube URL.")
-            text = loaders.load_youtube(youtube_url)
-        elif source_type == "image":
-            if file_bytes is None:
-                raise loaders.LoaderError("Missing image file.")
-            ocr_text = loaders.load_image(file_bytes)
-            if len(ocr_text.strip()) < _MIN_OCR_CHARS_BEFORE_SKIPPING_VISION and describe_image_fn is not None:
-                logger.info(
-                    "OCR found only %d char(s) for %r (below %d-char threshold) — "
-                    "running vision model to get a real description.",
-                    len(ocr_text.strip()), source_name, _MIN_OCR_CHARS_BEFORE_SKIPPING_VISION,
-                )
-                vision_text = describe_image_fn(file_bytes, ocr_text=ocr_text)
-                # Keep whatever OCR found (it may still be a real, short
-                # label/caption) alongside the richer vision description,
-                # rather than throwing it away.
-                text = f"{ocr_text}\n\n{vision_text}".strip() if ocr_text.strip() else vision_text
-            else:
-                text = ocr_text
-        elif source_type in _LOADERS:
-            if file_bytes is None:
-                raise loaders.LoaderError(f"Missing file bytes for {source_type}.")
-            text = _LOADERS[source_type](file_bytes)
-        else:
-            raise loaders.LoaderError(f"Unsupported source_type: {source_type}")
+        text = _load_source_text(
+            source_type=source_type,
+            source_name=source_name,
+            file_bytes=file_bytes,
+            youtube_url=youtube_url,
+            describe_image_fn=describe_image_fn,
+        )
     except loaders.LoaderError as exc:
         logger.error("INGEST FAILED (load stage) | doc=%s | %s", document_id, exc)
         raise IngestionError(str(exc)) from exc
@@ -154,6 +256,18 @@ def ingest_file(
     logger.info(
         "INGEST DONE | user=%s doc=%s source=%r | %d chunks upserted in %.2fs",
         user_id, document_id, source_name, upserted, elapsed,
+    )
+
+    _log_ingestion_summary(
+        document_id=document_id,
+        user_id=user_id,
+        source_name=source_name,
+        source_type=source_type,
+        text=text,
+        chunks=chunks,
+        vectors=vectors,
+        upserted=upserted,
+        elapsed=elapsed,
     )
 
     return IngestionResult(chunk_count=upserted)

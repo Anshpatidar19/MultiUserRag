@@ -1,4 +1,5 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from app.config import get_settings
@@ -9,6 +10,14 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 RRF_K = 60
+
+# Both branches of hybrid search are network I/O (a Pinecone query, and
+# either a Supabase fetch to rebuild the BM25 cache or a cache hit that
+# returns instantly) and don't depend on each other's results, so
+# running them back-to-back was pure added latency for no reason. A
+# small dedicated pool runs them concurrently -- retrieval wall time
+# becomes roughly max(dense, bm25) instead of dense + bm25.
+_retrieval_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="hybrid-retrieval")
 
 
 @dataclass
@@ -39,8 +48,19 @@ def hybrid_search(db, user_id: str, query_text: str) -> list[RetrievedChunk]:
     pool = settings.retrieval_candidate_pool
     rerank_pool = settings.retrieval_rerank_pool
 
+    # embed_query() is a local, in-process model call (fast, no network),
+    # so it stays on the calling thread; the two genuinely slow, mutually
+    # independent I/O calls below run concurrently instead of sequentially.
     query_emb = embeddings.embed_query(query_text)
-    dense_hits = vectorstore.query(user_id=user_id, query_embedding=query_emb, top_k=pool)
+
+    dense_future = _retrieval_executor.submit(
+        vectorstore.query, user_id=user_id, query_embedding=query_emb, top_k=pool
+    )
+    bm25_future = _retrieval_executor.submit(get_or_build, user_id, lambda: _fetch_user_corpus(db, user_id))
+
+    dense_hits = dense_future.result()
+    cache_entry = bm25_future.result()
+
     dense_rank = {hit["id"]: rank for rank, hit in enumerate(dense_hits)}
     dense_score_by_id = {hit["id"]: hit["score"] for hit in dense_hits}
     chunk_meta_by_id = {
@@ -48,7 +68,6 @@ def hybrid_search(db, user_id: str, query_text: str) -> list[RetrievedChunk]:
         for hit in dense_hits
     }
 
-    cache_entry = get_or_build(user_id, lambda: _fetch_user_corpus(db, user_id))
     bm25_rank: dict[str, int] = {}
     bm25_score_by_id: dict[str, float] = {}
     if cache_entry.bm25 is not None and cache_entry.chunk_ids:

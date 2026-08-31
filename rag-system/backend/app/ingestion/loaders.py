@@ -43,11 +43,24 @@ class LoaderError(Exception):
 _OCR_CONFIG = "--psm 6"
 
 
-def load_pdf(file_bytes: bytes) -> str:
+def load_pdf(file_bytes: bytes, describe_page_fn=None) -> str:
     """
     Try native text extraction first (fast, exact). If a page yields no
     text -- almost always because it's a scanned image -- fall back to
     OCR for that page only, so a mixed text+scan PDF doesn't lose pages.
+
+    `describe_page_fn`, when provided (see ingestion/pipeline.py), is a
+    vision-model callable `(image_bytes, ocr_text=...) -> str` invoked on
+    every OCR'd page's actual rendered image, not just its OCR text.
+    This matters specifically for scanned TABLES/MARKSHEETS: tesseract's
+    OCR can extract plenty of *characters* from a marks grid (so it
+    looks "successful") while still misaligning which number belongs to
+    which subject/row -- a silent failure that pure text-length checks
+    can't catch. Giving Gemini the actual page image lets it read the
+    grid directly instead of trusting OCR's row/column guesses. The raw
+    OCR text is still kept and folded in alongside the vision reading
+    (see pipeline.py/client.py) since it remains useful for plain prose
+    pages and as a spelling/label hint.
     """
     reader = PdfReader(io.BytesIO(file_bytes))
     if len(reader.pages) == 0:
@@ -67,8 +80,20 @@ def load_pdf(file_bytes: bytes) -> str:
     if ocr_needed_pages:
         images = convert_from_bytes(file_bytes)
         for i in ocr_needed_pages:
-            if i < len(images):
-                ocr_text = pytesseract.image_to_string(images[i], config=_OCR_CONFIG).strip()
+            if i >= len(images):
+                continue
+            page_image = images[i]
+            ocr_text = pytesseract.image_to_string(page_image, config=_OCR_CONFIG).strip()
+
+            if describe_page_fn is not None:
+                buf = io.BytesIO()
+                page_image.save(buf, format="PNG")
+                try:
+                    vision_text = describe_page_fn(buf.getvalue(), ocr_text=ocr_text)
+                except Exception:  # noqa: BLE001 - never lose the raw OCR text over a vision-call failure
+                    vision_text = ""
+                text_parts[i] = "\n\n".join(t for t in (ocr_text, vision_text) if t.strip())
+            else:
                 text_parts[i] = ocr_text
 
     full_text = "\n\n".join(t for t in text_parts if t)
@@ -83,10 +108,11 @@ def load_pdf(file_bytes: bytes) -> str:
 def load_image(file_bytes: bytes) -> str:
     """
     OCR first (cheap, catches printed/handwritten text in the photo).
-    If OCR yields nothing useful, the caller's pipeline should fall back
-    to a vision-model description so a photo with no text (e.g. a
-    diagram or a scene) is still searchable -- that fallback lives in
-    pipeline.py since it needs the LLM client, not here.
+    The caller's pipeline always follows this up with a vision-model
+    description (see pipeline.py) -- OCR text alone can't count people
+    in a photo or reliably read a table/marksheet's row/column
+    structure, so it's treated as a helpful hint for the vision model
+    rather than the final answer.
     """
     image = Image.open(io.BytesIO(file_bytes))
     ocr_text = pytesseract.image_to_string(image, config=_OCR_CONFIG).strip()
