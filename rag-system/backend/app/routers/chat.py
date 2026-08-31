@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from app.auth import CurrentUser, get_current_user
 from app.llm.client import stream_answer, is_small_talk
 from app.llm.confidence import compute_confidence
+from app.llm.smalltalk import match_canned_reply
 from app.models import ChatRequest
 from app.observability.tracing import query_trace, stage_span, record_confidence
 from app.config import get_settings
@@ -40,9 +41,52 @@ def _load_history(db, session_id: str, user_id: str) -> list[dict]:
 
 @router.post("")
 async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user)):
+    # Pure greetings ("hi", "hii", "hyy", "hello", thanks, bye, ...) get a
+    # hardcoded reply with ZERO retrieval and ZERO LLM call -- see
+    # llm/smalltalk.py. This is the fast path the frontend's "thinking…"
+    # indicator should basically never show for. Anything that isn't
+    # unambiguously pure small talk (e.g. "hi, what's in my contract?")
+    # returns None here and falls through to the normal pipeline below.
+    canned_reply = match_canned_reply(body.message)
+
     branch = "small_talk" if is_small_talk(body.message) else "rag"
     t0 = time.perf_counter()
-    logger.info("QUERY START | user=%s session=%s branch=%s | %r", user.id, body.session_id, branch, body.message)
+    logger.info(
+        "QUERY START | user=%s session=%s branch=%s canned=%s | %r",
+        user.id, body.session_id, branch, canned_reply is not None, body.message,
+    )
+
+    if canned_reply is not None:
+
+        def canned_stream():
+            user.db.table("chat_messages").insert(
+                {"session_id": body.session_id, "user_id": user.id, "role": "user", "content": body.message}
+            ).execute()
+
+            yield f"data: {json.dumps({'type': 'token', 'content': canned_reply})}\n\n"
+
+            user.db.table("chat_messages").insert(
+                {
+                    "session_id": body.session_id,
+                    "user_id": user.id,
+                    "role": "assistant",
+                    "content": canned_reply,
+                    "citations": [],
+                    "confidence": None,
+                }
+            ).execute()
+            user.db.table("chat_sessions").update({"last_active_at": "now()"}).eq(
+                "id", body.session_id
+            ).eq("user_id", user.id).execute()
+
+            elapsed = time.perf_counter() - t0
+            logger.info(
+                "QUERY DONE (canned reply, no retrieval/LLM) | user=%s session=%s | %.3fs",
+                user.id, body.session_id, elapsed,
+            )
+            yield f"data: {json.dumps({'type': 'done', 'citations': [], 'confidence_score': None, 'confidence_label': None, 'grounded': None})}\n\n"
+
+        return StreamingResponse(canned_stream(), media_type="text/event-stream")
 
     def event_stream():
         with query_trace(user_id=user.id, session_id=body.session_id, query=body.message, branch=branch) as trace:

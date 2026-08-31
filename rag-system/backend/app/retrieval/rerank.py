@@ -48,6 +48,18 @@ def _get_reranker():
         return None
 
 
+def warmup() -> None:
+    """
+    Force the cross-encoder to load now (app startup), not on the first
+    chat query. Loading involves a disk read (or a first-time download)
+    plus model init that can take several seconds -- paying that cost
+    once at boot means the very first user of a freshly-started backend
+    doesn't get stuck with a multi-second "Reading relevant sources…"
+    wait that every later query wouldn't have.
+    """
+    _get_reranker()
+
+
 def rerank(query: str, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
     model = _get_reranker()
     if model is None or not chunks:

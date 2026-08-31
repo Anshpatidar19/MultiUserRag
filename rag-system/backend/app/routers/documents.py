@@ -180,12 +180,20 @@ def _process_ingestion(
     so Gemini always receives the image's real content type rather than
     the previous hardcoded "image/jpeg" default -- that mismatch could
     degrade or break vision descriptions for anything uploaded as PNG.
+
+    PDFs get their own vision callback too now (mime type "image/png",
+    since scanned PDF pages are always rendered to PNG in loaders.py
+    before being handed to the vision model) -- this is what fixes
+    marksheets/tables scanned into a PDF, not just ones uploaded as a
+    standalone photo. See ingestion/pipeline.py's module docstring for
+    the full rationale.
     """
-    describe_fn = (
-        functools.partial(describe_image_with_vision, mime_type=image_mime_type)
-        if source_type == "image"
-        else None
-    )
+    describe_fn = None
+    if source_type == "image":
+        describe_fn = functools.partial(describe_image_with_vision, mime_type=image_mime_type)
+    elif source_type == "pdf":
+        describe_fn = functools.partial(describe_image_with_vision, mime_type="image/png")
+
     try:
         result = ingest_file(
             db=user.db,
@@ -337,4 +345,4 @@ async def delete_document(document_id: str, user: CurrentUser = Depends(get_curr
 
     invalidate_user_cache(user.id)  # this user's corpus just changed -- don't serve stale BM25
     logger.info("Document %s deleted | user=%s", document_id, user.id)
-    return None
+    return None   
