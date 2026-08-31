@@ -137,12 +137,18 @@ def stream_answer(
             yield chunk.text
 
 
-def describe_image_with_vision(image_bytes: bytes) -> str:
+def describe_image_with_vision(
+    image_bytes: bytes,
+    *,
+    mime_type: str = "image/jpeg",
+    ocr_text: str = "",
+) -> str:
     """
-    Fallback used by ingestion/pipeline.py when OCR extracts nothing
-    from an uploaded image (e.g. a photo/diagram with no text) -- asks
-    Gemini to produce a searchable description so the image's *content*
-    is still retrievable, not just literal text in it.
+    Fallback used by ingestion/pipeline.py when OCR extracts little or no
+    usable text from an uploaded image (e.g. a photo/diagram with no
+    text, or only a stray watermark/timestamp) -- asks Gemini to produce
+    a searchable description so the image's *content* is still
+    retrievable, not just literal text in it.
 
     The prompt below is deliberately more specific than a bare "describe
     this image" would be. A generic description (e.g. "a person stands
@@ -156,12 +162,31 @@ def describe_image_with_vision(image_bytes: bytes) -> str:
     identification now or "is this X" / "which monument is this"
     questions will never find a match later.
 
+    `mime_type` MUST match the actual uploaded file's format -- a PNG
+    sent with mime_type="image/jpeg" was a real bug here previously
+    (hardcoded default) and can degrade or break Gemini's read of the
+    image. Callers should always pass the real content type.
+
+    `ocr_text`, if provided, is folded into the prompt so real text
+    OCR *did* find (e.g. a sign, a caption, a label) isn't discarded
+    just because it wasn't the whole story -- the model is asked to
+    incorporate it rather than duplicate or ignore it.
+
     Uses the same `gemini_model` as chat -- no separate vision-only
     model needed, since Gemini's models are natively multimodal (unlike
     the old Groq setup, which required switching to a distinct
     vision-capable model and was the source of a "content must be a
     string" 400 error when that switch was missed).
     """
+    ocr_note = (
+        f"\n\nOCR already extracted this text from the image (it may be "
+        f"partial, noisy, or just a watermark/label): \"{ocr_text.strip()}\". "
+        "Weave in anything genuinely useful from it, but do not just repeat "
+        "it back -- your job is to add the visual description and "
+        "identification below, which OCR cannot provide."
+        if ocr_text.strip()
+        else ""
+    )
     prompt = (
         "Describe this image in detail for search indexing. Then, if the image "
         "shows a recognizable landmark, monument, statue, building, or place, "
@@ -173,13 +198,13 @@ def describe_image_with_vision(image_bytes: bytes) -> str:
         "facing, or looking relative to any landmark or notable object in the "
         "frame (e.g. \"a person in a white shirt is looking toward the statue "
         "in the background\"), since viewers may later ask what someone in the "
-        "photo is looking at."
+        "photo is looking at." + ocr_note
     )
     resp = _client.models.generate_content(
         model=settings.gemini_model,
         contents=[
             types.Part.from_text(text=prompt),
-            types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
         ],
     )
     return resp.text or ""

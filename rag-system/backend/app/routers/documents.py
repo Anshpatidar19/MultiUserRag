@@ -36,6 +36,7 @@ is "processing" (see DocumentsContext.jsx) to pick up "ready"/"failed"
 once the background task finishes.
 """
 
+import functools
 import logging
 import mimetypes
 import uuid
@@ -166,13 +167,25 @@ def _process_ingestion(
     source_type: str,
     file_bytes: bytes | None = None,
     youtube_url: str | None = None,
+    image_mime_type: str | None = None,
 ):
     """
     The slow half: load -> chunk -> embed -> upsert, then flip the row to
     "ready"/"failed". Runs as a BackgroundTask (i.e. in a worker thread,
     after the response for the upload request has already been sent) so
     it neither blocks the client nor the event loop for other users.
+
+    `image_mime_type` is bound onto the vision fallback here (instead of
+    inside pipeline.py, which has no knowledge of the original filename)
+    so Gemini always receives the image's real content type rather than
+    the previous hardcoded "image/jpeg" default -- that mismatch could
+    degrade or break vision descriptions for anything uploaded as PNG.
     """
+    describe_fn = (
+        functools.partial(describe_image_with_vision, mime_type=image_mime_type)
+        if source_type == "image"
+        else None
+    )
     try:
         result = ingest_file(
             db=user.db,
@@ -182,7 +195,7 @@ def _process_ingestion(
             source_type=source_type,
             file_bytes=file_bytes,
             youtube_url=youtube_url,
-            describe_image_fn=describe_image_with_vision,
+            describe_image_fn=describe_fn,
         )
     except IngestionError as exc:
         logger.error("Document %s (%r) FAILED: %s", document_id, source_name, exc)
@@ -234,6 +247,7 @@ async def upload_document(
         source_name=file.filename,
         source_type=source_type,
         file_bytes=file_bytes,
+        image_mime_type=_content_type_from_filename(file.filename) if source_type == "image" else None,
     )
     row = user.db.table("documents").select("*").eq("id", document_id).single().execute()
     return row.data
