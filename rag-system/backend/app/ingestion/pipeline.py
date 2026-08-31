@@ -28,6 +28,18 @@ class IngestionError(Exception):
     pass
 
 
+# OCR on a real photo (as opposed to a scanned text document) very often
+# returns a *few* stray characters -- a watermark, a timestamp, noise
+# misread from a texture -- without returning nothing at all. The old
+# gate ("if not text.strip()") treated any non-empty OCR result as "this
+# image has usable text," which skipped the vision description entirely
+# and left the image indexed under a near-useless scrap. This threshold
+# means "OCR found less than a real sentence's worth of content," which
+# is a much better proxy for "this image actually needs a vision
+# description" than mere non-emptiness.
+_MIN_OCR_CHARS_BEFORE_SKIPPING_VISION = 40
+
+
 @dataclass
 class IngestionResult:
     chunk_count: int
@@ -65,10 +77,20 @@ def ingest_file(
         elif source_type == "image":
             if file_bytes is None:
                 raise loaders.LoaderError("Missing image file.")
-            text = loaders.load_image(file_bytes)
-            if not text.strip() and describe_image_fn is not None:
-                logger.info("OCR found no text for %r — falling back to vision model.", source_name)
-                text = describe_image_fn(file_bytes)
+            ocr_text = loaders.load_image(file_bytes)
+            if len(ocr_text.strip()) < _MIN_OCR_CHARS_BEFORE_SKIPPING_VISION and describe_image_fn is not None:
+                logger.info(
+                    "OCR found only %d char(s) for %r (below %d-char threshold) — "
+                    "running vision model to get a real description.",
+                    len(ocr_text.strip()), source_name, _MIN_OCR_CHARS_BEFORE_SKIPPING_VISION,
+                )
+                vision_text = describe_image_fn(file_bytes, ocr_text=ocr_text)
+                # Keep whatever OCR found (it may still be a real, short
+                # label/caption) alongside the richer vision description,
+                # rather than throwing it away.
+                text = f"{ocr_text}\n\n{vision_text}".strip() if ocr_text.strip() else vision_text
+            else:
+                text = ocr_text
         elif source_type in _LOADERS:
             if file_bytes is None:
                 raise loaders.LoaderError(f"Missing file bytes for {source_type}.")

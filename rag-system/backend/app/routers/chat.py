@@ -50,6 +50,38 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
                 {"session_id": body.session_id, "user_id": user.id, "role": "user", "content": body.message}
             ).execute()
 
+            # Ingestion is async (see routers/documents.py) -- a freshly
+            # uploaded file can still be mid-chunk/embed for several
+            # seconds after the upload request returns. Without this
+            # check, hybrid_search() below silently queries whatever is
+            # already indexed and the user gets an answer built entirely
+            # from OLDER documents, with no indication anything was still
+            # processing -- indistinguishable from "the new upload was
+            # read and just wasn't relevant." Surfacing this explicitly
+            # avoids a confidently-wrong answer from being mistaken for a
+            # grounded one.
+            processing_note = ""
+            if branch == "rag":
+                still_processing = (
+                    user.db.table("documents")
+                    .select("source_name")
+                    .eq("user_id", user.id)
+                    .eq("status", "processing")
+                    .execute()
+                )
+                processing_names = [d["source_name"] for d in (still_processing.data or [])]
+                if processing_names:
+                    logger.info(
+                        "QUERY WHILE INGESTION IN FLIGHT | user=%s | still processing: %r",
+                        user.id, processing_names,
+                    )
+                    names_str = ", ".join(processing_names)
+                    processing_note = (
+                        f"_Note: {names_str} " + ("is" if len(processing_names) == 1 else "are")
+                        + " still being processed and isn't searchable yet -- "
+                        "the answer below may not reflect it._\n\n"
+                    )
+
             chunks = []
             if branch == "rag":
                 yield f"data: {json.dumps({'type': 'status', 'message': 'Searching your documents…'})}\n\n"
@@ -83,7 +115,13 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
 
             yield f"data: {json.dumps({'type': 'status', 'message': 'Writing an answer…'})}\n\n"
 
-            full_answer = ""
+            # Emitted as a real 'token' (not a new event type) so it
+            # shows up in the answer text on every client -- the frontend
+            # only switches on 'status' / 'token' / 'done' today, so any
+            # other event type would be silently dropped.
+            full_answer = processing_note
+            if processing_note:
+                yield f"data: {json.dumps({'type': 'token', 'content': processing_note})}\n\n"
             with stage_span(trace, "generation", language=body.language) as gen_span:
                 for delta in stream_answer(
                     question=body.message, chunks=chunks, history=history, language_hint=body.language
