@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     # --- Observability ---
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
-    langfuse_host: str = "https://cloud.langfuse.com"
+    langfuse_host: str = "https://jp.cloud.langfuse.com"
 
     # --- Misc ---
     cors_origins: list[str] = ["http://localhost:5173"]
