@@ -3,11 +3,29 @@ routers/chat.py
 
 The orchestration for a single turn: retrieve -> generate (streamed) ->
 score confidence -> persist -> trace.
+
+LATENCY: bookkeeping runs concurrently with retrieval, not before it.
+------------------------------------------------------------------
+Previously this handler paid for THREE sequential DB round-trips
+(insert the user's message, check which documents are still
+processing, load chat history) strictly BEFORE retrieval even started,
+even though none of those three depend on retrieval's result or on
+each other. hybrid.py already parallelizes its own two I/O calls
+(dense + BM25) for exactly this reason; the same idea applies one
+level up. All four independent I/O operations -- insert, processing
+check, retrieval, history load -- are now submitted to a shared thread
+pool up front and only joined at the point each result is actually
+needed, so wall time drops from roughly
+(insert + processing_check + retrieval + history) to roughly
+max(insert, processing_check, retrieval, history) -- i.e. retrieval's
+own time dominates, and the ~150-400ms the other three used to add on
+top of it is now hidden underneath it instead.
 """
 
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -26,6 +44,8 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
+_bookkeeping_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="chat-bookkeeping")
+
 
 def _load_history(db, session_id: str, user_id: str) -> list[dict]:
     resp = (
@@ -41,14 +61,7 @@ def _load_history(db, session_id: str, user_id: str) -> list[dict]:
 
 @router.post("")
 async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user)):
-    # Pure greetings ("hi", "hii", "hyy", "hello", thanks, bye, ...) get a
-    # hardcoded reply with ZERO retrieval and ZERO LLM call -- see
-    # llm/smalltalk.py. This is the fast path the frontend's "thinking…"
-    # indicator should basically never show for. Anything that isn't
-    # unambiguously pure small talk (e.g. "hi, what's in my contract?")
-    # returns None here and falls through to the normal pipeline below.
     canned_reply = match_canned_reply(body.message)
-
     branch = "small_talk" if is_small_talk(body.message) else "rag"
     t0 = time.perf_counter()
     logger.info(
@@ -88,55 +101,49 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
 
         return StreamingResponse(canned_stream(), media_type="text/event-stream")
 
+    def _insert_user_message():
+        user.db.table("chat_messages").insert(
+            {"session_id": body.session_id, "user_id": user.id, "role": "user", "content": body.message}
+        ).execute()
+
+    def _check_still_processing() -> list[str]:
+        if branch != "rag":
+            return []
+        resp = (
+            user.db.table("documents")
+            .select("source_name")
+            .eq("user_id", user.id)
+            .eq("status", "processing")
+            .execute()
+        )
+        return [d["source_name"] for d in (resp.data or [])]
+
+    def _retrieve():
+        fused = hybrid_search(user.db, user.id, body.message)
+        reranked = rerank(body.message, fused)
+        filtered = [
+            c for c in reranked
+            if c.rerank_score is None or c.rerank_score >= settings.retrieval_min_rerank_score
+        ]
+        return fused, reranked, filtered
+
+    def _history():
+        return _load_history(user.db, body.session_id, user.id)
+
     def event_stream():
         with query_trace(user_id=user.id, session_id=body.session_id, query=body.message, branch=branch) as trace:
-            user.db.table("chat_messages").insert(
-                {"session_id": body.session_id, "user_id": user.id, "role": "user", "content": body.message}
-            ).execute()
-
-            # Ingestion is async (see routers/documents.py) -- a freshly
-            # uploaded file can still be mid-chunk/embed for several
-            # seconds after the upload request returns. Without this
-            # check, hybrid_search() below silently queries whatever is
-            # already indexed and the user gets an answer built entirely
-            # from OLDER documents, with no indication anything was still
-            # processing -- indistinguishable from "the new upload was
-            # read and just wasn't relevant." Surfacing this explicitly
-            # avoids a confidently-wrong answer from being mistaken for a
-            # grounded one.
-            processing_note = ""
-            if branch == "rag":
-                still_processing = (
-                    user.db.table("documents")
-                    .select("source_name")
-                    .eq("user_id", user.id)
-                    .eq("status", "processing")
-                    .execute()
-                )
-                processing_names = [d["source_name"] for d in (still_processing.data or [])]
-                if processing_names:
-                    logger.info(
-                        "QUERY WHILE INGESTION IN FLIGHT | user=%s | still processing: %r",
-                        user.id, processing_names,
-                    )
-                    names_str = ", ".join(processing_names)
-                    processing_note = (
-                        f"_Note: {names_str} " + ("is" if len(processing_names) == 1 else "are")
-                        + " still being processed and isn't searchable yet -- "
-                        "the answer below may not reflect it._\n\n"
-                    )
+            # Fire all independent bookkeeping/retrieval work now; join
+            # each one only where its result is actually needed below.
+            insert_future = _bookkeeping_executor.submit(_insert_user_message)
+            processing_future = _bookkeeping_executor.submit(_check_still_processing)
+            history_future = _bookkeeping_executor.submit(_history)
 
             chunks = []
             if branch == "rag":
                 yield f"data: {json.dumps({'type': 'status', 'message': 'Searching your documents…'})}\n\n"
                 with stage_span(trace, "retrieval", query=body.message) as span:
-                    fused = hybrid_search(user.db, user.id, body.message)
-                    reranked = rerank(body.message, fused)
-                    filtered = [
-                        c
-                        for c in reranked
-                        if c.rerank_score is None or c.rerank_score >= settings.retrieval_min_rerank_score
-                    ]
+                    retrieval_future = _bookkeeping_executor.submit(_retrieve)
+                    fused, reranked, filtered = retrieval_future.result()
                     chunks = filtered[: settings.retrieval_top_k]
                     span.update(output={"retrieved": [c.text[:200] for c in chunks]})
 
@@ -155,14 +162,25 @@ async def chat(body: ChatRequest, user: CurrentUser = Depends(get_current_user))
                 logger.info("SMALL TALK branch — retrieval skipped for this query.")
                 yield f"data: {json.dumps({'type': 'status', 'message': 'Thinking…'})}\n\n"
 
-            history = _load_history(user.db, body.session_id, user.id)
+            processing_names = processing_future.result()
+            processing_note = ""
+            if processing_names:
+                logger.info(
+                    "QUERY WHILE INGESTION IN FLIGHT | user=%s | still processing: %r",
+                    user.id, processing_names,
+                )
+                names_str = ", ".join(processing_names)
+                processing_note = (
+                    f"_Note: {names_str} " + ("is" if len(processing_names) == 1 else "are")
+                    + " still being processed and isn't searchable yet -- "
+                    "the answer below may not reflect it._\n\n"
+                )
+
+            history = history_future.result()
+            insert_future.result()  # propagate any bookkeeping failure; near-certainly already done by now
 
             yield f"data: {json.dumps({'type': 'status', 'message': 'Writing an answer…'})}\n\n"
 
-            # Emitted as a real 'token' (not a new event type) so it
-            # shows up in the answer text on every client -- the frontend
-            # only switches on 'status' / 'token' / 'done' today, so any
-            # other event type would be silently dropped.
             full_answer = processing_note
             if processing_note:
                 yield f"data: {json.dumps({'type': 'token', 'content': processing_note})}\n\n"

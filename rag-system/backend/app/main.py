@@ -4,8 +4,9 @@ main.py
 App entrypoint. Only responsibilities here: create the FastAPI app,
 attach CORS, and mount routers. Auth enforcement happens per-route via
 the `get_current_user` dependency (see auth.py) rather than global
-middleware, so it's explicit in each router's function signature which
-endpoints require auth (all of them, in this app).
+middleware, so it's explicit in each route's function signature which
+endpoints require auth (all of them). Admin routes additionally depend
+on `get_current_admin` (see admin.py), a stricter check layered on top.
 """
 
 import asyncio
@@ -19,7 +20,7 @@ from app.logging_config import setup_logging
 from app.config import get_settings
 from app.ingestion import embeddings
 from app.retrieval import rerank
-from app.routers import documents, sessions, chat
+from app.routers import documents, sessions, chat, admin
 
 setup_logging()  # must run before any other app module's logger is used
 logger = logging.getLogger(__name__)
@@ -39,22 +40,13 @@ app.add_middleware(
 app.include_router(documents.router)
 app.include_router(sessions.router)
 app.include_router(chat.router)
+app.include_router(admin.router)
 
 
 @app.on_event("startup")
 async def on_startup():
     logger.info("RAG API starting up — CORS origins: %s", settings.cors_origins)
 
-    # Warm the embedding model + cross-encoder reranker NOW, before we
-    # start accepting traffic, instead of lazily on whichever request
-    # happens to be first. Both models used to load via functools.lru_cache
-    # on first use, which meant the very first chat query after a (re)start
-    # ate several extra seconds of disk-read/model-init latency on top of
-    # its normal retrieval time -- indistinguishable from "this app is
-    # slow" to whoever triggered it. Run in a thread so the startup event
-    # loop isn't blocked doing synchronous PyTorch/model-loading work, but
-    # we still `await` it so uvicorn doesn't start serving requests until
-    # it's done.
     t0 = time.perf_counter()
     await asyncio.gather(
         asyncio.to_thread(embeddings.warmup),

@@ -142,3 +142,35 @@ create policy "storage_documents_insert_own"
 create policy "storage_documents_delete_own"
   on storage.objects for delete
   using (bucket_id = 'documents' and (storage.foldername(name))[1] = auth.uid()::text);
+
+-- admin_schema.sql
+--
+-- Defines who's an admin via an explicit allowlist table rather than a
+-- boolean column on auth.users (which Supabase manages and discourages
+-- extending directly) or a client-editable "profiles.is_admin" flag
+-- (which would need extremely careful RLS to stop a user granting
+-- themselves admin). This table has NO insert/update/delete policy for
+-- anon/authenticated roles at all -- the only way to add or remove an
+-- admin is directly via the Supabase SQL editor (service role), or a
+-- trusted backend script using the service-role key. The backend's
+-- `get_current_admin` dependency (app/admin.py) also only ever reads
+-- this table via the service-role client, never the per-user RLS
+-- client, so there's no path where a normal user's client could even
+-- attempt to read or write it.
+
+create table if not exists admin_users (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  added_at timestamptz not null default now()
+);
+
+alter table admin_users enable row level security;
+-- Intentionally NO policies created: with RLS enabled and zero
+-- policies, every role except the service-role key is denied by
+-- default -- exactly the "only the backend, via service role, can
+-- touch this" guarantee we want.
+
+-- To make yourself the first admin, run this once (swap in your real
+-- user id -- find it in Supabase Dashboard > Authentication > Users):
+--
+--   insert into admin_users (user_id)
+--   values ('00000000-0000-0000-0000-000000000000');
