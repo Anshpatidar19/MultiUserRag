@@ -29,6 +29,17 @@ anyway. Gated mode is provided for deployments where a wrong-but-labeled
 answer is worse than no answer (e.g. compliance/legal contexts) -- that
 tradeoff is a deployment decision, which is why it's a config flag and
 documented here rather than hardcoded.
+
+PROMPT MANAGEMENT:
+All three prompts used in this file (system prompt, image caption
+prompt, log summary prompt) are fetched live from Langfuse
+(name="rag-system-prompt" / "rag-image-caption-prompt" /
+"rag-log-summary-prompt", label="production") rather than hardcoded,
+so they can be edited/versioned in the Langfuse UI without a
+redeploy. See scripts/seed_prompts.py to push/update them. Each
+get_*_prompt() function below falls back to a hardcoded string if
+Langfuse is unreachable or unconfigured -- generation must never
+break because prompt management is down.
 """
 
 from collections.abc import Iterator
@@ -37,13 +48,19 @@ from google import genai
 from google.genai import types
 
 from app.config import get_settings
+from app.observability.tracing import _langfuse  # reuse existing Langfuse client
 from app.retrieval.hybrid import RetrievedChunk
 
 settings = get_settings()
 
 _client = genai.Client(api_key=settings.gemini_api_key)
 
-SYSTEM_PROMPT = """You are a retrieval-augmented assistant. You are given CONTEXT \
+
+# ---------------------------------------------------------------------------
+# 1. Main RAG answer-generation prompt
+# ---------------------------------------------------------------------------
+
+_FALLBACK_SYSTEM_PROMPT = """You are a retrieval-augmented assistant. You are given CONTEXT \
 retrieved from the user's private knowledge base. Answer the user's question.
 
 Rules:
@@ -58,6 +75,126 @@ beyond the one required note above.
 - If the user's message is small talk / a greeting with no informational question, \
 just respond naturally and briefly -- do not force in a documents disclaimer.
 """
+
+
+def get_system_prompt(lang_instruction: str) -> str:
+    """
+    Fetches the RAG answer-generation system prompt from Langfuse
+    (name="rag-system-prompt", label="production") and compiles in
+    the language instruction. Falls back to the hardcoded string if
+    Langfuse isn't configured or the fetch fails.
+
+    The Langfuse SDK caches prompts client-side, so calling this on
+    every request (as stream_answer does below) is cheap -- it's not
+    a network round-trip per query.
+    """
+    if _langfuse is None:
+        return _FALLBACK_SYSTEM_PROMPT + lang_instruction
+    try:
+        prompt = _langfuse.get_prompt("rag-system-prompt", label="production")
+        return prompt.compile(lang_instruction=lang_instruction)
+    except Exception:  # noqa: BLE001 - never let prompt fetch break generation
+        return _FALLBACK_SYSTEM_PROMPT + lang_instruction
+
+
+# ---------------------------------------------------------------------------
+# 2. Image captioning prompt
+# ---------------------------------------------------------------------------
+
+_FALLBACK_IMAGE_CAPTION_PROMPT = """Look at this image carefully and produce a detailed, search-indexable \
+description. Cover EVERY one of the following that applies -- skip a \
+numbered point only if it genuinely doesn't apply to this image:
+
+1. PEOPLE / GROUP PHOTOS: If any people are visible, state the exact \
+number of people in the image (count every visible person, including \
+partially visible or background ones -- if you are genuinely unsure \
+whether two people overlap into one, give your best count and say so, \
+e.g. "approximately 7 people"). Briefly describe each person's \
+relative position (e.g. "left to right: ...") and what they're doing, \
+facing, or looking at, since viewers will later ask things like \
+"how many people are in this photo" or "who is looking at the camera."
+
+2. TABLES, FORMS, MARKSHEETS, AND GRIDS OF NUMBERS: If the image contains \
+a table, form, marksheet, invoice, spreadsheet screenshot, or any grid \
+of labeled numbers, transcribe it as clean structured text, ONE ROW PER \
+LINE, preserving the exact association between each label and its \
+number(s) -- e.g. for a marksheet: "Subject: Mathematics | Marks \
+Obtained: 85 | Maximum Marks: 100". Read every digit directly off the \
+image pixel-by-pixel; do not guess or round. Include every row and every \
+column, and also state the total/aggregate/percentage/grade if one is \
+printed on the sheet. Double-check that no row's numbers have been \
+accidentally shifted onto a neighboring row.
+
+3. LANDMARKS AND PLACES: If the image shows a recognizable landmark, \
+monument, statue, building, or place, state its specific name explicitly \
+(e.g. "This is the Albert Hall Museum in Jaipur" or "This is the \
+Statue of Unity, Gujarat") -- do not just describe its architecture \
+generically. If unsure of the exact name, give your best guess and say \
+it's uncertain, rather than omitting a name entirely. If people are \
+visible near a landmark, note where they are standing, facing, or \
+looking relative to it.
+
+4. GENERAL SCENE: For anything not covered above (objects, animals, \
+diagrams, screenshots, charts, etc.), describe what's shown in enough \
+detail that someone could find this image later by searching for its \
+content."""
+
+
+def get_image_caption_prompt(ocr_text: str) -> str:
+    """
+    Fetches the vision-captioning prompt from Langfuse
+    (name="rag-image-caption-prompt", label="production") and
+    compiles in the OCR hint block. The "is there OCR text" branching
+    stays in Python (Langfuse's {{variable}} syntax is plain
+    substitution, no conditionals) -- we just compute ocr_note here
+    and pass it in as a variable either way.
+    """
+    ocr_note = (
+        f"\n\nOCR already extracted this text from the image (it may be "
+        f"partial, noisy, or have misaligned rows/columns -- scanned "
+        f"tables and grids are exactly where OCR tends to garble which "
+        f"number belongs to which row): \"{ocr_text.strip()}\". Use it as "
+        "a hint for spellings/labels, but READ THE IMAGE YOURSELF for "
+        "anything structured (tables, forms, grids of numbers) rather "
+        "than trusting the OCR text's alignment -- your own reading of "
+        "the pixels is the more reliable source for which value belongs "
+        "to which row/column."
+        if ocr_text.strip()
+        else ""
+    )
+    if _langfuse is None:
+        return _FALLBACK_IMAGE_CAPTION_PROMPT + ocr_note
+    try:
+        prompt = _langfuse.get_prompt("rag-image-caption-prompt", label="production")
+        return prompt.compile(ocr_note=ocr_note)
+    except Exception:  # noqa: BLE001 - never let prompt fetch break captioning
+        return _FALLBACK_IMAGE_CAPTION_PROMPT + ocr_note
+
+
+# ---------------------------------------------------------------------------
+# 3. Ingestion log-summary prompt
+# ---------------------------------------------------------------------------
+
+_FALLBACK_LOG_SUMMARY_PROMPT = """Summarize the following document content in 2-3 concise, \
+factual sentences for a developer log (no preamble like \
+"This document is about", just the summary itself):
+
+{snippet}"""
+
+
+def get_log_summary_prompt(snippet: str) -> str:
+    """
+    Fetches the ingestion log-summary prompt from Langfuse
+    (name="rag-log-summary-prompt", label="production") and compiles
+    in the document snippet.
+    """
+    if _langfuse is None:
+        return _FALLBACK_LOG_SUMMARY_PROMPT.format(snippet=snippet)
+    try:
+        prompt = _langfuse.get_prompt("rag-log-summary-prompt", label="production")
+        return prompt.compile(snippet=snippet)
+    except Exception:  # noqa: BLE001 - never let prompt fetch break logging
+        return _FALLBACK_LOG_SUMMARY_PROMPT.format(snippet=snippet)
 
 
 def build_context_block(chunks: list[RetrievedChunk]) -> str:
@@ -128,7 +265,7 @@ def stream_answer(
         model=settings.gemini_model,
         contents=contents,
         config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT + lang_instruction,
+            system_instruction=get_system_prompt(lang_instruction),
             temperature=0.2,
         ),
     )
@@ -150,12 +287,13 @@ def describe_image_with_vision(
     a searchable description so the image's *content* is still
     retrievable, not just literal text in it.
 
-    The prompt below is deliberately more specific than a bare "describe
-    this image" would be. A generic description (e.g. "a person stands
-    near an ornate sandstone building with domes") is visually accurate
-    but omits the ONE detail later identity questions actually search
-    for -- the landmark's name -- because nothing in a generic prompt
-    asks the model to commit to an identification. Since this caption is
+    The prompt (fetched from Langfuse via get_image_caption_prompt) is
+    deliberately more specific than a bare "describe this image" would
+    be. A generic description (e.g. "a person stands near an ornate
+    sandstone building with domes") is visually accurate but omits the
+    ONE detail later identity questions actually search for -- the
+    landmark's name -- because nothing in a generic prompt asks the
+    model to commit to an identification. Since this caption is
     generated once at upload time and is the ONLY thing chat retrieval
     can ever search against for this image (chat itself has no image
     input -- see ChatRequest in models.py), it has to front-load
@@ -178,54 +316,7 @@ def describe_image_with_vision(
     vision-capable model and was the source of a "content must be a
     string" 400 error when that switch was missed).
     """
-    ocr_note = (
-        f"\n\nOCR already extracted this text from the image (it may be "
-        f"partial, noisy, or have misaligned rows/columns -- scanned "
-        f"tables and grids are exactly where OCR tends to garble which "
-        f"number belongs to which row): \"{ocr_text.strip()}\". Use it as "
-        "a hint for spellings/labels, but READ THE IMAGE YOURSELF for "
-        "anything structured (tables, forms, grids of numbers) rather "
-        "than trusting the OCR text's alignment -- your own reading of "
-        "the pixels is the more reliable source for which value belongs "
-        "to which row/column."
-        if ocr_text.strip()
-        else ""
-    )
-    prompt = (
-        "Look at this image carefully and produce a detailed, search-indexable "
-        "description. Cover EVERY one of the following that applies -- skip a "
-        "numbered point only if it genuinely doesn't apply to this image:\n\n"
-        "1. PEOPLE / GROUP PHOTOS: If any people are visible, state the exact "
-        "number of people in the image (count every visible person, including "
-        "partially visible or background ones -- if you are genuinely unsure "
-        "whether two people overlap into one, give your best count and say so, "
-        "e.g. \"approximately 7 people\"). Briefly describe each person's "
-        "relative position (e.g. \"left to right: ...\") and what they're doing, "
-        "facing, or looking at, since viewers will later ask things like "
-        "\"how many people are in this photo\" or \"who is looking at the camera.\"\n\n"
-        "2. TABLES, FORMS, MARKSHEETS, AND GRIDS OF NUMBERS: If the image contains "
-        "a table, form, marksheet, invoice, spreadsheet screenshot, or any grid "
-        "of labeled numbers, transcribe it as clean structured text, ONE ROW PER "
-        "LINE, preserving the exact association between each label and its "
-        "number(s) -- e.g. for a marksheet: \"Subject: Mathematics | Marks "
-        "Obtained: 85 | Maximum Marks: 100\". Read every digit directly off the "
-        "image pixel-by-pixel; do not guess or round. Include every row and every "
-        "column, and also state the total/aggregate/percentage/grade if one is "
-        "printed on the sheet. Double-check that no row's numbers have been "
-        "accidentally shifted onto a neighboring row.\n\n"
-        "3. LANDMARKS AND PLACES: If the image shows a recognizable landmark, "
-        "monument, statue, building, or place, state its specific name explicitly "
-        "(e.g. \"This is the Albert Hall Museum in Jaipur\" or \"This is the "
-        "Statue of Unity, Gujarat\") -- do not just describe its architecture "
-        "generically. If unsure of the exact name, give your best guess and say "
-        "it's uncertain, rather than omitting a name entirely. If people are "
-        "visible near a landmark, note where they are standing, facing, or "
-        "looking relative to it.\n\n"
-        "4. GENERAL SCENE: For anything not covered above (objects, animals, "
-        "diagrams, screenshots, charts, etc.), describe what's shown in enough "
-        "detail that someone could find this image later by searching for its "
-        "content." + ocr_note
-    )
+    prompt = get_image_caption_prompt(ocr_text)
     resp = _client.models.generate_content(
         model=settings.gemini_model,
         contents=[
@@ -256,14 +347,7 @@ def summarize_for_log(text: str) -> str:
         resp = _client.models.generate_content(
             model=settings.gemini_model,
             contents=[
-                types.Part.from_text(
-                    text=(
-                        "Summarize the following document content in 2-3 concise, "
-                        "factual sentences for a developer log (no preamble like "
-                        "\"This document is about\", just the summary itself):\n\n"
-                        f"{snippet}"
-                    )
-                ),
+                types.Part.from_text(text=get_log_summary_prompt(snippet)),
             ],
         )
         return (resp.text or "").strip()

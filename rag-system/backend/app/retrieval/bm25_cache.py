@@ -21,16 +21,14 @@ instance; a multi-instance deployment would swap this for Redis with the
 same per-user-key contract.
 """
 
-import re
 import time
 from dataclasses import dataclass
 from rank_bm25 import BM25Okapi
 
 from app.config import get_settings
+from app.retrieval.tokenizer import tokenize as _tokenize
 
 settings = get_settings()
-
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 @dataclass
@@ -45,15 +43,14 @@ class _CacheEntry:
 
 _CACHE: dict[str, _CacheEntry] = {}
 
-
-def _tokenize(text: str) -> list[str]:
-    # Regex word-extraction, not .split() -- a naive whitespace split left
-    # punctuation glued onto tokens (e.g. "SUBJECTS/PAPERS" became the
-    # single token "subjects/papers", which could never match a query
-    # token like "subject" or "subjects"). This mirrors the tokenizer
-    # llm/confidence.py already uses for lexical grounding, so indexing
-    # and grounding scoring stay consistent.
-    return _TOKEN_RE.findall(text.lower())
+# _tokenize is imported (not redefined) from retrieval/tokenizer.py, the
+# single shared tokenizer used by BM25 indexing/querying here AND by the
+# lexical-grounding overlap check in llm/confidence.py. It does regex
+# word-extraction (not .split(), which left punctuation glued onto tokens
+# like "SUBJECTS/PAPERS") followed by Porter stemming, so morphological
+# variants of the same word -- "accounts" / "accounting" / "account",
+# "exam" / "exams" -- collapse onto one token instead of being treated as
+# unrelated strings. See tokenizer.py for the full rationale.
 
 
 def get_or_build(user_id: str, corpus_fetcher) -> _CacheEntry:

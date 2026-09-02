@@ -4,7 +4,8 @@ from dataclasses import dataclass
 
 from app.config import get_settings
 from app.ingestion import embeddings, vectorstore
-from app.retrieval.bm25_cache import get_or_build, _tokenize
+from app.retrieval.bm25_cache import get_or_build
+from app.retrieval.tokenizer import tokenize as _tokenize
 
 logger = logging.getLogger(__name__)
 settings = get_settings()

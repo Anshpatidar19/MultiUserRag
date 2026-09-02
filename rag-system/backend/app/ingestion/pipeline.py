@@ -42,6 +42,27 @@ and it only affects background ingestion, never a user-facing request
 latency. The prompt itself (see llm/client.py::describe_image_with_vision)
 now explicitly asks for an exact people-count and for row-preserving
 table/marksheet transcription.
+
+SUMMARY CHUNK (added):
+-----------------------
+`summarize_for_log()` was previously called ONLY to pretty-print the
+`INGEST DONE` console line -- the 2-3 sentence summary it produces
+(e.g. "These documents are official academic statements of marks
+issued by ... to student Deepak Singh Chouhan") never made it into the
+vector store. That's a real gap, not a cosmetic one: fixed-size
+chunking splits a document's identifying details (name, roll number,
+enrollment number) across many chunks, each diluted with OCR noise and
+vision-model boilerplate -- so no single chunk is ever a clean answer
+to a broad/vague query like "tell me about deepak". The LLM-written
+summary IS that clean answer; it was just being thrown away.
+
+Fix: generate the summary once (still best-effort / never fails
+ingestion), prepend it to the chunk list as a labeled "document
+summary" chunk BEFORE embedding, and reuse the same summary for both
+the log line and the actual index. It's chunk index 0 of every
+document, so a short/entity-style query has a real chance of a direct
+hit instead of needing enough exact keyword overlap to statistically
+outrank noisier chunks.
 """
 
 import logging
@@ -67,6 +88,31 @@ _LOADERS = {
     "csv": loaders.load_csv,
     "docx": loaders.load_docx,
 }
+
+SUMMARY_CHUNK_PREFIX = "[DOCUMENT SUMMARY]"
+
+
+def _make_summary_text(*, source_name: str, full_text: str) -> str:
+    """
+    Best-effort: generate the same short summary used in the ingestion
+    log, formatted as a standalone, self-contained chunk (source name +
+    summary) so it reads sensibly on its own when retrieved out of
+    context. Returns "" on any failure -- summary generation must never
+    break ingestion; callers fall back to skipping the summary chunk.
+    """
+    from app.llm.client import summarize_for_log  # local import: avoids a
+    # module-level import cycle (llm/client.py doesn't import pipeline.py,
+    # but keeping this import local keeps pipeline.py's own import graph
+    # -- loaders/chunking/embeddings/vectorstore only -- easy to reason
+    # about at a glance).
+
+    try:
+        summary = summarize_for_log(full_text)
+    except Exception:  # noqa: BLE001 - must never break ingestion
+        summary = ""
+    if not summary:
+        return ""
+    return f"{SUMMARY_CHUNK_PREFIX} {source_name}: {summary}"
 
 
 def _load_source_text(
@@ -122,6 +168,7 @@ def _log_ingestion_summary(
     source_name: str,
     source_type: str,
     text: str,
+    summary: str,
     chunks: list,
     vectors: list,
     upserted: int,
@@ -134,20 +181,10 @@ def _log_ingestion_summary(
     exactly what got extracted and indexed for every upload without
     digging through a database.
 
-    Best-effort only: a summary-generation failure (e.g. Gemini API
-    hiccup) must never fail the ingestion itself, so everything here is
-    wrapped defensively and falls back to a truncated-text preview.
+    `summary` is now passed in (computed once in `ingest_file`, shared
+    with the actual summary chunk that gets embedded/indexed) rather
+    than generated a second time here purely for the log line.
     """
-    from app.llm.client import summarize_for_log  # local import: avoids a
-    # module-level import cycle (llm/client.py doesn't import pipeline.py,
-    # but keeping this import local keeps pipeline.py's own import graph
-    # -- loaders/chunking/embeddings/vectorstore only -- easy to reason
-    # about at a glance).
-
-    try:
-        summary = summarize_for_log(text)
-    except Exception:  # noqa: BLE001 - logging helper, must never break ingestion
-        summary = ""
     if not summary:
         summary = text.strip().replace("\n", " ")[:300] + ("…" if len(text.strip()) > 300 else "")
 
@@ -210,10 +247,30 @@ def ingest_file(
         )
     logger.info("Loaded text | doc=%s | %d chars extracted", document_id, len(text))
 
-    chunks = chunking.chunk_text(text)
-    if not chunks:
+    summary_text = _make_summary_text(source_name=source_name, full_text=text)
+
+    body_chunks = chunking.chunk_text(text)
+    if not body_chunks:
         logger.error("INGEST FAILED (zero chunks after splitting) | doc=%s", document_id)
         raise IngestionError("Content was extracted but produced zero chunks after splitting.")
+
+    chunks = list(body_chunks)
+    if summary_text:
+        # Prepend as index 0 and shift the rest, so it always gets a
+        # deterministic chunk_id (f"{document_id}::0") like every other
+        # chunk -- no schema change, no special-casing downstream in
+        # vectorstore.py or document_chunks. The [DOCUMENT SUMMARY]
+        # prefix makes it identifiable in citations/previews.
+        chunks = [chunking.Chunk(text=summary_text, index=0)] + [
+            chunking.Chunk(text=c.text, index=i + 1) for i, c in enumerate(body_chunks)
+        ]
+        logger.info("Added summary chunk | doc=%s | %d chars", document_id, len(summary_text))
+    else:
+        logger.warning(
+            "No summary chunk added (summary generation failed/empty) | doc=%s -- "
+            "broad/vague queries about this document may retrieve less reliably.",
+            document_id,
+        )
     logger.info("Chunked | doc=%s | %d chunks created", document_id, len(chunks))
 
     vectors = embeddings.embed_texts([c.text for c in chunks])
@@ -264,10 +321,11 @@ def ingest_file(
         source_name=source_name,
         source_type=source_type,
         text=text,
+        summary=summary_text,
         chunks=chunks,
         vectors=vectors,
         upserted=upserted,
         elapsed=elapsed,
     )
 
-    return IngestionResult(chunk_count=upserted)
+    return IngestionResult(chunk_count=upserted) 

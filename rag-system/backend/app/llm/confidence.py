@@ -29,9 +29,9 @@ optimality -- documented here so the choice is explicit and revisitable.
 """
 
 from dataclasses import dataclass
-import re
 
 from app.retrieval.hybrid import RetrievedChunk
+from app.retrieval.tokenizer import tokenize
 
 WEIGHTS = {
     "retrieval_similarity": 0.4,
@@ -48,7 +48,12 @@ class ConfidenceResult:
 
 
 def _tokens(text: str) -> set[str]:
-    return set(re.findall(r"[a-z0-9]+", text.lower()))
+    # Uses the same stemming tokenizer as BM25 (retrieval/tokenizer.py),
+    # not an independent copy -- so grounding overlap isn't unfairly
+    # penalized just because the model phrased something as "accounting"
+    # when the source text said "accounts" (or any other morphological
+    # variant of the same word). See tokenizer.py for the full rationale.
+    return set(tokenize(text))
 
 
 def _label(score: float) -> str:
