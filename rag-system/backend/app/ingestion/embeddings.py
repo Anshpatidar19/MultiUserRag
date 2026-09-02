@@ -1,18 +1,3 @@
-"""
-embeddings.py
-
-Wraps a local sentence-transformers model (default: all-MiniLM-L6-v2) so
-embedding is free and doesn't depend on an external API's uptime/rate
-limits -- a deliberate cost + reliability choice over e.g. OpenAI
-embeddings, per spec. The model is loaded once per process (module-level
-singleton) since loading it is the expensive part, not inference.
-
-`warmup()` forces that expensive load to happen at app startup (see
-main.py) instead of on the first real request -- without it, whichever
-user's query happens to be first pays several extra seconds (disk
-read + model init) that every subsequent query wouldn't. Same rationale
-as retrieval/rerank.py's warmup().
-"""
 
 from functools import lru_cache
 import numpy as np

@@ -16,9 +16,9 @@ via the YouTube API, not generic page scraping.
 
 import io
 import csv
+import pdfplumber
 import pytesseract
 from PIL import Image
-from pypdf import PdfReader
 from pdf2image import convert_from_bytes
 from docx import Document as DocxDocument
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
@@ -27,55 +27,29 @@ class LoaderError(Exception):
     """Raised with a message safe to show directly to the user."""
 
 
-# Tesseract's default page-segmentation mode (PSM 3, "fully automatic")
-# tries to detect a page's layout and can decide a grid of numbers with
-# little surrounding prose -- e.g. a marksheet's marks-obtained columns --
-# isn't a real text block, and silently drops it instead of erroring.
-# Confirmed on a real scanned marksheet: PSM 3 extracted every subject
-# name but ZERO of the numeric marks; PSM 6 ("assume a single uniform
-# block of text") kept every row intact, e.g.
-# "ACCOUNTING (FINANCIAL ACCOUNTING) TH 085 85 28 047 047".
-# This is a silent failure -- OCR returns non-empty, plausible-looking
-# text, so nothing upstream (loader, chunker, ingestion) has any signal
-# that a whole column of data went missing. Applies to both the PDF-OCR
-# fallback and standalone image OCR below, since both hit the same
-# tesseract default otherwise.
 _OCR_CONFIG = "--psm 6"
 
 
 def load_pdf(file_bytes: bytes, describe_page_fn=None) -> str:
-    """
-    Try native text extraction first (fast, exact). If a page yields no
-    text -- almost always because it's a scanned image -- fall back to
-    OCR for that page only, so a mixed text+scan PDF doesn't lose pages.
+   
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            if len(pdf.pages) == 0:
+                raise LoaderError("PDF has no pages.")
 
-    `describe_page_fn`, when provided (see ingestion/pipeline.py), is a
-    vision-model callable `(image_bytes, ocr_text=...) -> str` invoked on
-    every OCR'd page's actual rendered image, not just its OCR text.
-    This matters specifically for scanned TABLES/MARKSHEETS: tesseract's
-    OCR can extract plenty of *characters* from a marks grid (so it
-    looks "successful") while still misaligning which number belongs to
-    which subject/row -- a silent failure that pure text-length checks
-    can't catch. Giving Gemini the actual page image lets it read the
-    grid directly instead of trusting OCR's row/column guesses. The raw
-    OCR text is still kept and folded in alongside the vision reading
-    (see pipeline.py/client.py) since it remains useful for plain prose
-    pages and as a spelling/label hint.
-    """
-    reader = PdfReader(io.BytesIO(file_bytes))
-    if len(reader.pages) == 0:
-        raise LoaderError("PDF has no pages.")
-
-    text_parts: list[str] = []
-    ocr_needed_pages: list[int] = []
-
-    for i, page in enumerate(reader.pages):
-        page_text = (page.extract_text() or "").strip()
-        if page_text:
-            text_parts.append(page_text)
-        else:
-            text_parts.append("")  # placeholder, filled in by OCR pass below
-            ocr_needed_pages.append(i)
+            text_parts: list[str] = []
+            ocr_needed_pages: list[int] = []
+            for i, page in enumerate(pdf.pages):
+                page_text = (page.extract_text() or "").strip()
+                if page_text:
+                    text_parts.append(page_text)
+                else:
+                    text_parts.append("")  # placeholder, filled in by OCR pass below
+                    ocr_needed_pages.append(i)
+    except LoaderError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surface as a user-facing loader error
+        raise LoaderError(f"Could not read this PDF: {exc}") from exc
 
     if ocr_needed_pages:
         images = convert_from_bytes(file_bytes)
